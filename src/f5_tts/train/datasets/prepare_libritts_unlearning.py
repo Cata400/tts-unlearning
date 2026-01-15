@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 
@@ -23,11 +24,13 @@ def deal_with_audio_dir(audio_dir):
         text_path = line.with_suffix(".normalized.txt")
         text = open(text_path, "r").read().strip()
         duration = sf.info(line).duration
+        speaker_id = audio_dir.parts[-1] # This assumes the structure .../root/<speaker_id>/...
         if duration < 0.4 or duration > 30:
             continue
-        sub_result.append({"audio_path": str(line), "text": text, "duration": duration})
+        sub_result.append({"audio_path": str(line), "text": text, "duration": duration, "speaker_id": speaker_id})
         durations.append(duration)
         vocab_set.update(list(text))
+    
     return sub_result, durations, vocab_set
 
 
@@ -69,13 +72,16 @@ def main():
         json.dump({"duration": duration_list}, f, ensure_ascii=False)
 
     # vocab map, i.e. tokenizer
-    with open(f"{save_dir}/vocab.txt", "w") as f:
+    with open(f"{save_dir}/vocab_orig.txt", "w") as f:
         for vocab in sorted(text_vocab_set):
             f.write(vocab + "\n")
 
     print(f"\nFor {dataset_name}, sample count: {len(result)}")
     print(f"For {dataset_name}, vocab size is: {len(text_vocab_set)}")
     print(f"For {dataset_name}, total {sum(duration_list) / 3600:.2f} hours")
+    
+    pretrained_model_vocab = str(files("f5_tts").joinpath("../../")) + f"/data/Emilia_ZH_EN_pinyin/vocab.txt"
+    shutil.copy2(pretrained_model_vocab, f"{save_dir}/vocab.txt")
 
 
 if __name__ == "__main__":
@@ -83,9 +89,11 @@ if __name__ == "__main__":
 
     tokenizer = "pinyin"  # "pinyin" | "char"
 
-    SUB_SET = ["train-clean-100", "train-clean-360", "train-other-500"]
+    # SUB_SET = ["train-clean-100", "train-clean-360", "train-other-500"]
+    SUB_SET = ["train-clean-100_train_intra_speaker_split_0.2"]
     dataset_dir = "/home/catalin/Desktop/Datasets/LibriTTS"
     dataset_name = f"LibriTTS_{'_'.join(SUB_SET)}_{tokenizer}".replace("train-clean-", "").replace("train-other-", "")
+
     save_dir = str(files("f5_tts").joinpath("../../")) + f"/data/{dataset_name}"
     print(f"\nPrepare for {dataset_name}, will save to {save_dir}\n")
     main()

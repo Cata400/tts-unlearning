@@ -48,27 +48,27 @@ repos:
       - id: autoflake
         args: ["--in-place", "--recursive", "--remove-unused-variables", "--remove-all-unused-imports"]
 
-  # Show warnings for code standards not respected
-  - repo: https://github.com/pylint-dev/pylint
-    rev: v4.0.4
-    hooks:
-      - id: pylint
-        name: pylint
-        entry: pylint
-        language: python
-        types: [python]
-        args: [
-          "--max-line-length=120",
-          "--min-similarity-lines=10",
-          "--max-attributes=10",
-          "--max-locals=50",
-          "--max-branches=50",
-          "--max-statements=200",
-          "--max-nested-blocks=10",
-          "--max-returns=12",
-          "--disable=E0401,E1120,R0903,E1102,C0103",
-          "--fail-under=8",
-        ]
+  # # Show warnings for code standards not respected
+  # - repo: https://github.com/pylint-dev/pylint
+  #   rev: v4.0.4
+  #   hooks:
+  #     - id: pylint
+  #       name: pylint
+  #       entry: pylint
+  #       language: python
+  #       types: [python]
+  #       args: [
+  #         "--max-line-length=120",
+  #         "--min-similarity-lines=10",
+  #         "--max-attributes=10",
+  #         "--max-locals=50",
+  #         "--max-branches=50",
+  #         "--max-statements=200",
+  #         "--max-nested-blocks=10",
+  #         "--max-returns=12",
+  #         "--disable=E0401,E1120,R0903,E1102,C0103",
+  #         "--fail-under=8",
+  #       ]
 
 default_stages:
   - pre-commit

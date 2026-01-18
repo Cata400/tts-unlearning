@@ -16,17 +16,17 @@ from torch.utils.data import DataLoader, Dataset, SequentialSampler
 from tqdm import tqdm
 
 from f5_tts.model import CFM
-from f5_tts.model.dataset import DynamicBatchSampler, collate_fn
+from f5_tts.model.dataset import DynamicBatchSampler, collate_fn_unlearning
 from f5_tts.model.utils import default, exists
-
 
 # trainer unlearn
 
 
-class TrainerUnlearn: # TODO add info logger
+class TrainerUnlearn:  # TODO add info logger
     def __init__(
         self,
         model: CFM,
+        teacher: CFM,
         epochs,
         learning_rate,
         num_warmup_updates=20000,
@@ -41,7 +41,7 @@ class TrainerUnlearn: # TODO add info logger
         max_grad_norm=1.0,
         noise_scheduler: str | None = None,
         duration_predictor: torch.nn.Module | None = None,
-        logger: str | None = "wandb",  # "wandb" | "tensorboard" | None
+        logger: str | None = "tensorboard",  # "wandb" | "tensorboard" | None
         wandb_project="test_f5-tts",
         wandb_run_name="test_run",
         wandb_resume_id: str = None,
@@ -54,6 +54,7 @@ class TrainerUnlearn: # TODO add info logger
         is_local_vocoder: bool = False,  # use local path vocoder
         local_vocoder_path: str = "",  # local vocoder path
         model_cfg_dict: dict = dict(),  # training config
+        unlearn_params: dict = dict(),  # unlearning params
     ):
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
@@ -100,6 +101,7 @@ class TrainerUnlearn: # TODO add info logger
             self.writer = SummaryWriter(log_dir=f"runs/{wandb_run_name}")
 
         self.model = model
+        self.teacher = teacher
 
         if self.is_main:
             self.ema_model = EMA(model, include_online_model=False, **ema_kwargs)
@@ -117,6 +119,7 @@ class TrainerUnlearn: # TODO add info logger
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
         self.last_per_updates = default(last_per_updates, save_per_updates)
         self.checkpoint_path = default(checkpoint_path, "ckpts/test_f5-tts")
+        self.teacher_path = teacher_path
 
         self.batch_size_per_gpu = batch_size_per_gpu
         self.batch_size_type = batch_size_type
@@ -139,7 +142,9 @@ class TrainerUnlearn: # TODO add info logger
             self.optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=learning_rate)
         else:
             self.optimizer = AdamW(model.parameters(), lr=learning_rate)
-        self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
+        self.teacher, self.model, self.optimizer = self.accelerator.prepare(self.teacher, self.model, self.optimizer)
+
+        self.unlearn_params = unlearn_params
 
     @property
     def is_main(self):
@@ -186,7 +191,7 @@ class TrainerUnlearn: # TODO add info logger
             or not os.path.exists(self.checkpoint_path)
             or not any(filename.endswith((".pt", ".safetensors")) for filename in os.listdir(self.checkpoint_path))
         ):
-            print(f"No checkpoint found in {self.checkpoint_path}, training from scratch.")
+            print(f"No checkpoint found in {self.checkpoint_path}, training from teacher weights")
             return 0
 
         self.accelerator.wait_for_everyone()
@@ -211,6 +216,11 @@ class TrainerUnlearn: # TODO add info logger
                 # If no training checkpoints, use pretrained model
                 latest_checkpoint = next(f for f in all_checkpoints if f.startswith("pretrained_"))
 
+        if latest_checkpoint.startswith("pretrained_"):
+            print(f"Only pretrained checkpoint found: {latest_checkpoint}, skipping loading student weights.")
+            return 0
+
+        print(f"Loading checkpoint {latest_checkpoint} from {self.checkpoint_path}")
         if latest_checkpoint.endswith(".safetensors"):  # always a pretrained checkpoint
             from safetensors.torch import load_file
 
@@ -261,9 +271,73 @@ class TrainerUnlearn: # TODO add info logger
         gc.collect()
         return update
 
+    def load_pretrained_checkpoint(self, model):
+        if (
+            not exists(self.teacher_path)
+            or not os.path.exists(self.teacher_path)
+            or not self.teacher_path.endswith((".pt", ".safetensors"))
+        ):
+            raise ValueError(f"No pretrained checkpoint found in {self.teacher_path}, aborting")
+
+        self.accelerator.wait_for_everyone()
+
+        print(f"Loading pretrained checkpoint {self.teacher_path}")
+        if self.teacher_path.endswith(".safetensors"):  # always a pretrained checkpoint
+            from safetensors.torch import load_file
+
+            checkpoint = load_file(self.teacher_path, device="cpu")
+            checkpoint = {"ema_model_state_dict": checkpoint}
+        elif self.teacher_path.endswith(".pt"):
+            # checkpoint = torch.load(f"{self.checkpoint_path}/{latest_checkpoint}", map_location=self.accelerator.device)  # rather use accelerator.load_state
+            checkpoint = torch.load(self.teacher_path, weights_only=True, map_location="cpu")
+
+        # patch for backward compatibility, 305e3ea
+        for key in ["ema_model.mel_spec.mel_stft.mel_scale.fb", "ema_model.mel_spec.mel_stft.spectrogram.window"]:
+            if key in checkpoint["ema_model_state_dict"]:
+                del checkpoint["ema_model_state_dict"][key]
+
+        if self.is_main:
+            self.ema_model.load_state_dict(checkpoint["ema_model_state_dict"])
+
+        if "update" in checkpoint or "step" in checkpoint:
+            # patch for backward compatibility, with before f992c4e
+            if "step" in checkpoint:
+                checkpoint["update"] = checkpoint["step"] // self.grad_accumulation_steps
+                if self.grad_accumulation_steps > 1 and self.is_main:
+                    print(
+                        "F5-TTS WARNING: Loading checkpoint saved with per_steps logic (before f992c4e), will convert to per_updates according to grad_accumulation_steps setting, may have unexpected behaviour."
+                    )
+            # patch for backward compatibility, 305e3ea
+            for key in ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]:
+                if key in checkpoint["model_state_dict"]:
+                    del checkpoint["model_state_dict"][key]
+
+            self.accelerator.unwrap_model(model).load_state_dict(checkpoint["model_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if self.scheduler:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            update = 0
+        else:
+            checkpoint["model_state_dict"] = {
+                k.replace("ema_model.", ""): v
+                for k, v in checkpoint["ema_model_state_dict"].items()
+                if k not in ["initted", "update", "step"]
+            }
+            self.accelerator.unwrap_model(model).load_state_dict(checkpoint["model_state_dict"])
+            update = 0
+
+        del checkpoint
+        gc.collect()
+        return update
+
     def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         if self.log_samples:
-            from f5_tts.infer.utils_infer import cfg_strength, load_vocoder, nfe_step, sway_sampling_coef
+            from f5_tts.infer.utils_infer import (
+                cfg_strength,
+                load_vocoder,
+                nfe_step,
+                sway_sampling_coef,
+            )
 
             vocoder = load_vocoder(
                 vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
@@ -281,7 +355,7 @@ class TrainerUnlearn: # TODO add info logger
         if self.batch_size_type == "sample":
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn,
+                collate_fn=collate_fn_unlearning,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
@@ -301,7 +375,7 @@ class TrainerUnlearn: # TODO add info logger
             )
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn,
+                collate_fn=collate_fn_unlearning,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
@@ -326,8 +400,15 @@ class TrainerUnlearn: # TODO add info logger
         train_dataloader, self.scheduler = self.accelerator.prepare(
             train_dataloader, self.scheduler
         )  # actual multi_gpu updates = single_gpu updates / gpu nums
+        self.load_pretrained_checkpoint(self.teacher)
+        self.load_pretrained_checkpoint(self.model)
         start_update = self.load_checkpoint()
         global_update = start_update
+
+        # set teacher to eval and no grad
+        self.accelerator.unwrap_model(self.teacher).eval()
+        for param in self.accelerator.unwrap_model(self.teacher).parameters():
+            param.requires_grad = False
 
         if exists(resumable_with_seed):
             orig_epoch_step = len(train_dataloader)
@@ -370,9 +451,64 @@ class TrainerUnlearn: # TODO add info logger
                         dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
                         self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
 
-                    loss, cond, pred = self.model(
+                    student_loss, student_cond, student_pred = self.model(
                         mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
                     )
+
+                    if batch["unlearn_labels"].sum() != len(
+                        batch["unlearn_labels"]
+                    ):  # if there is at least one forget sample
+                        # If there is a shape error I will have to extract the forget samples out of the batch,
+                        # process them separately, and then recombine the unconditioned mel specs and compute loss (rechange how
+                        # forget loss is computed)
+                        infer_texts = [
+                            text_inputs[i] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[i]
+                            for i in range(len(text_inputs))
+                        ]
+                        with torch.inference_mode():
+                            unconditioned_mel_spec, _ = self.accelerator.unwrap_model(self.model).sample(
+                                cond=torch.zeros_like(mel_spec[:mel_lengths]),  # This is only for the shape
+                                text=infer_texts,
+                                duration=mel_lengths * 2,
+                                no_ref_audio=True,
+                                steps=nfe_step,
+                                cfg_strength=cfg_strength,
+                                sway_sampling_coef=sway_sampling_coef,
+                            )
+                            unconditioned_mel_spec = unconditioned_mel_spec.to(torch.float32)
+                            unconditioned_mel_spec = (
+                                unconditioned_mel_spec[:, mel_lengths:, :].permute(0, 2, 1).to(self.accelerator.device)
+                            )
+
+                            teacher_loss, teacher_cond, teacher_pred = self.teacher.forward_forget(
+                                mel_spec,
+                                unconditioned_mel_spec,
+                                text=text_inputs,
+                                lens=mel_lengths,
+                                noise_scheduler=self.noise_scheduler,
+                            )
+                    else:
+                        teacher_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+                    retain_loss = (
+                        student_loss
+                        * (1 + batch["unlearn_labels"])
+                        * 0.5
+                        * len(batch["unlearn_labels"]).float()
+                        / ((batch["unlearn_labels"] + 1).sum() * 0.5 + 1e-8)
+                    )
+                    forget_loss = (
+                        teacher_loss
+                        * (1 - batch["unlearn_labels"])
+                        * 0.5
+                        * len(batch["unlearn_labels"]).float()
+                        / ((1 - batch["unlearn_labels"]).sum() * 0.5 + 1e-8)
+                    )
+                    # Sanity check
+                    print(f"Retain loss: {student_loss * (1 + batch['unlearn_labels'])}")
+                    print(f"Forget loss: {teacher_loss * (1 - batch['unlearn_labels'])}")
+                    loss = self.unlearn_params["alpha"] * retain_loss + (1 - self.unlearn_params["alpha"]) * forget_loss
+
                     self.accelerator.backward(loss)
 
                     if self.max_grad_norm > 0 and self.accelerator.sync_gradients:

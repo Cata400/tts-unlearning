@@ -161,8 +161,8 @@ class CustomDataset(Dataset):
             "mel_spec": mel_spec,
             "text": text,
         }
-        
-        
+
+
 class CustomUnlearningDataset(Dataset):
     def __init__(
         self,
@@ -222,9 +222,9 @@ class CustomUnlearningDataset(Dataset):
             # filter by given length
             if 0.3 <= duration <= 30:
                 break  # valid
-            
+
             if speaker_id is None:
-                raise ValueError(f"Speaker ID not found in the dataset for unlearning.")
+                raise ValueError("Speaker ID not found in the dataset for unlearning.")
 
             index = (index + 1) % len(self.data)
 
@@ -249,7 +249,7 @@ class CustomUnlearningDataset(Dataset):
         return {
             "mel_spec": mel_spec,
             "text": text,
-            "unlearn": -1 if speaker_id in self.forget_speakers else 1,
+            "unlearn_label": -1 if speaker_id in self.forget_speakers else 1,
         }
 
 
@@ -361,7 +361,7 @@ def load_dataset(
         with open(f"{rel_data_path}/duration.json", "r", encoding="utf-8") as f:
             data_dict = json.load(f)
         durations = data_dict["duration"]
-        
+
         if dataset_type == "CustomDataset":
             train_dataset = CustomDataset(
                 train_dataset,
@@ -430,4 +430,31 @@ def collate_fn(batch):
         mel_lengths=mel_lengths,  # records for padding mask
         text=text,
         text_lengths=text_lengths,
+    )
+
+
+def collate_fn_unlearning(batch):
+    mel_specs = [item["mel_spec"].squeeze(0) for item in batch]
+    mel_lengths = torch.LongTensor([spec.shape[-1] for spec in mel_specs])
+    max_mel_length = mel_lengths.amax()
+
+    padded_mel_specs = []
+    for spec in mel_specs:
+        padding = (0, max_mel_length - spec.size(-1))
+        padded_spec = F.pad(spec, padding, value=0)
+        padded_mel_specs.append(padded_spec)
+
+    mel_specs = torch.stack(padded_mel_specs)
+
+    text = [item["text"] for item in batch]
+    text_lengths = torch.LongTensor([len(item) for item in text])
+
+    unlearn_labels = torch.LongTensor([item["unlearn_label"] for item in batch])
+
+    return dict(
+        mel=mel_specs,
+        mel_lengths=mel_lengths,  # records for padding mask
+        text=text,
+        text_lengths=text_lengths,
+        unlearn_labels=unlearn_labels,
     )

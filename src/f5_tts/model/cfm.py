@@ -6,6 +6,7 @@ nt - text sequence
 nw - raw wave length
 d - dimension
 """
+
 # ruff: noqa: F722 F821
 
 from __future__ import annotations
@@ -278,6 +279,80 @@ class CFM(nn.Module):
         t = time.unsqueeze(-1).unsqueeze(-1)
         φ = (1 - t) * x0 + t * x1
         flow = x1 - x0
+
+        # only predict what is within the random mask span for infilling
+        cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)
+
+        # transformer and cfg training with a drop rate
+        drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
+        if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
+            drop_audio_cond = True
+            drop_text = True
+        else:
+            drop_text = False
+
+        # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
+        pred = self.transformer(
+            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask
+        )
+
+        # flow matching loss
+        loss = F.mse_loss(pred, flow, reduction="none")
+        loss = loss[rand_span_mask]
+
+        return loss.mean(), cond, pred
+
+    def forward_forget(
+        self,
+        inp: float["b n d"] | float["b nw"],  # mel or raw wave
+        flow_inp: float["b n d"] | float["b nw"],  # mel or raw wave
+        text: int["b nt"] | list[str],
+        *,
+        lens: int["b"] | None = None,
+        noise_scheduler: str | None = None,
+    ):
+        # handle raw wave
+        if inp.ndim == 2:
+            inp = self.mel_spec(inp)
+            inp = inp.permute(0, 2, 1)
+            assert inp.shape[-1] == self.num_channels
+
+        batch, seq_len, dtype, device, _σ1 = *inp.shape[:2], inp.dtype, self.device, self.sigma
+
+        # handle text as string
+        if isinstance(text, list):
+            if exists(self.vocab_char_map):
+                text = list_str_to_idx(text, self.vocab_char_map).to(device)
+            else:
+                text = list_str_to_tensor(text).to(device)
+            assert text.shape[0] == batch
+
+        # lens and mask
+        if not exists(lens):  # if lens not acquired by trainer from collate_fn
+            lens = torch.full((batch,), seq_len, device=device)
+        mask = lens_to_mask(lens, length=seq_len)
+
+        # get a random span to mask out for training conditionally
+        frac_lengths = torch.zeros((batch,), device=self.device).float().uniform_(*self.frac_lengths_mask)
+        rand_span_mask = mask_from_frac_lengths(lens, frac_lengths)
+
+        if exists(mask):
+            rand_span_mask &= mask
+
+        # mel is x1
+        x1 = inp
+
+        # x0 is gaussian noise
+        x0 = torch.randn_like(x1)
+
+        # time step
+        time = torch.rand((batch,), dtype=dtype, device=self.device)
+        # TODO. noise_scheduler
+
+        # sample xt (φ_t(x) in the paper)
+        t = time.unsqueeze(-1).unsqueeze(-1)
+        φ = (1 - t) * x0 + t * x1
+        flow = flow_inp - x0
 
         # only predict what is within the random mask span for infilling
         cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)

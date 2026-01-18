@@ -1,21 +1,20 @@
 # training script.
 
 import os
+import random
+
+# supress warnings
+import warnings
 from importlib.resources import files
 
 import hydra
+import numpy as np
+import torch
 from omegaconf import OmegaConf
 
 from f5_tts.model import CFM, TrainerUnlearn
 from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer
-
-import random
-import torch
-import numpy as np
-
-# supress warnings
-import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -27,6 +26,16 @@ def main(model_cfg):
     random.seed(model_cfg.unlearn.random_seed)
     torch.manual_seed(model_cfg.unlearn.random_seed)
     np.random.seed(model_cfg.unlearn.random_seed)
+
+    # Check unlearn methods
+    unlearn_params = None
+    for method, params in model_cfg.unlearn.unlearn_methods.items():
+        if params.use:
+            print(f"Using unlearn method {method} with params: {params}")
+            unlearn_params = params
+            break
+    if unlearn_params is None:
+        raise ValueError("No unlearn method specified in the configuration.")
 
     model_cls = hydra.utils.get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
@@ -43,8 +52,13 @@ def main(model_cfg):
         tokenizer_path = model_cfg.model.tokenizer_path
     vocab_char_map, vocab_size = get_tokenizer(tokenizer_path, tokenizer)
 
-    # set model
+    # set models
     model = CFM(
+        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=model_cfg.model.mel_spec.n_mel_channels),
+        mel_spec_kwargs=model_cfg.model.mel_spec,
+        vocab_char_map=vocab_char_map,
+    )
+    teacher = CFM(
         transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=model_cfg.model.mel_spec.n_mel_channels),
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
@@ -53,6 +67,7 @@ def main(model_cfg):
     # init trainer
     trainer = TrainerUnlearn(
         model,
+        teacher,
         epochs=model_cfg.optim.epochs,
         learning_rate=model_cfg.optim.learning_rate,
         num_warmup_updates=model_cfg.optim.num_warmup_updates,
@@ -76,12 +91,13 @@ def main(model_cfg):
         is_local_vocoder=model_cfg.model.vocoder.is_local,
         local_vocoder_path=model_cfg.model.vocoder.local_path,
         model_cfg_dict=OmegaConf.to_container(model_cfg, resolve=True),
+        unlearn_params=unlearn_params,
     )
 
     train_dataset = load_dataset(
-        model_cfg.datasets.name, 
+        model_cfg.datasets.name,
         tokenizer,
-        dataset_type="CustomUnlearningDataset", 
+        dataset_type="CustomUnlearningDataset",
         mel_spec_kwargs=model_cfg.model.mel_spec,
         forget_speakers=model_cfg.unlearn.forget_speakers,
     )

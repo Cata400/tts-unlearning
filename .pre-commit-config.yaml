@@ -12,9 +12,9 @@ repos:
         args: [--fix]
       - id: ruff-format
         name: ruff formatter
-      - id: ruff
-        name: ruff sorter
-        args: [--select, I, --fix]
+      # - id: ruff
+      #   name: ruff sorter
+      #   args: [--select, I, --fix]
 
   # Format code
   - repo: https://github.com/psf/black

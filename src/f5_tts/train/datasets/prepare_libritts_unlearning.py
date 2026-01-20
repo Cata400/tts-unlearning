@@ -2,7 +2,6 @@ import os
 import shutil
 import sys
 
-
 sys.path.append(os.getcwd())
 
 import json
@@ -18,26 +17,29 @@ from tqdm import tqdm
 def deal_with_audio_dir(audio_dir):
     sub_result, durations = [], []
     vocab_set = set()
+    speaker_ids_set = set()
     audio_lists = list(audio_dir.rglob("*.wav"))
 
     for line in audio_lists:
         text_path = line.with_suffix(".normalized.txt")
         text = open(text_path, "r").read().strip()
         duration = sf.info(line).duration
-        speaker_id = audio_dir.parts[-1] # This assumes the structure .../root/<speaker_id>/...
+        speaker_id = int(audio_dir.parts[-1])  # This assumes the structure .../root/<speaker_id>/...
         if duration < 0.4 or duration > 30:
             continue
         sub_result.append({"audio_path": str(line), "text": text, "duration": duration, "speaker_id": speaker_id})
         durations.append(duration)
         vocab_set.update(list(text))
-    
-    return sub_result, durations, vocab_set
+        speaker_ids_set.add(speaker_id)
+
+    return sub_result, durations, vocab_set, speaker_ids_set
 
 
 def main():
     result = []
     duration_list = []
     text_vocab_set = set()
+    speaker_id_set = set()
 
     # process raw data
     executor = ProcessPoolExecutor(max_workers=max_workers)
@@ -51,10 +53,11 @@ def main():
             if audio_dir.is_dir()
         ]
     for future in tqdm(futures, total=len(futures)):
-        sub_result, durations, vocab_set = future.result()
+        sub_result, durations, vocab_set, sub_speaker_ids_set = future.result()
         result.extend(sub_result)
         duration_list.extend(durations)
         text_vocab_set.update(vocab_set)
+        speaker_id_set.update(sub_speaker_ids_set)
     executor.shutdown()
 
     # save preprocessed dataset to disk
@@ -71,6 +74,11 @@ def main():
     with open(f"{save_dir}/duration.json", "w", encoding="utf-8") as f:
         json.dump({"duration": duration_list}, f, ensure_ascii=False)
 
+    # save speaker_id list
+    with open(f"{save_dir}/speaker_ids.txt", "w") as f:
+        for speaker_id in sorted(speaker_id_set):
+            f.write(str(speaker_id) + "\n")
+
     # vocab map, i.e. tokenizer
     with open(f"{save_dir}/vocab_orig.txt", "w") as f:
         for vocab in sorted(text_vocab_set):
@@ -79,8 +87,9 @@ def main():
     print(f"\nFor {dataset_name}, sample count: {len(result)}")
     print(f"For {dataset_name}, vocab size is: {len(text_vocab_set)}")
     print(f"For {dataset_name}, total {sum(duration_list) / 3600:.2f} hours")
-    
-    pretrained_model_vocab = str(files("f5_tts").joinpath("../../")) + f"/data/Emilia_ZH_EN_pinyin/vocab.txt"
+    print(f"For {dataset_name}, speaker count: {len(speaker_id_set)}")
+
+    pretrained_model_vocab = str(files("f5_tts").joinpath("../../")) + "/data/Emilia_ZH_EN_pinyin/vocab.txt"
     shutil.copy2(pretrained_model_vocab, f"{save_dir}/vocab.txt")
 
 

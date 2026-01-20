@@ -302,14 +302,15 @@ class CFM(nn.Module):
 
         return loss.mean(), cond, pred
 
-    def forward_forget(
+    def forward_unlearn(
         self,
         inp: float["b n d"] | float["b nw"],  # mel or raw wave
-        flow_inp: float["b n d"] | float["b nw"],  # mel or raw wave
         text: int["b nt"] | list[str],
         *,
         lens: int["b"] | None = None,
         noise_scheduler: str | None = None,
+        forget: bool = False,
+        flow_inp: float["b n d"] | float["b nw"] | None = None,  # mel or raw wave
     ):
         # handle raw wave
         if inp.ndim == 2:
@@ -352,7 +353,12 @@ class CFM(nn.Module):
         # sample xt (φ_t(x) in the paper)
         t = time.unsqueeze(-1).unsqueeze(-1)
         φ = (1 - t) * x0 + t * x1
-        flow = flow_inp - x0
+
+        if forget:
+            assert flow_inp is not None, "flow_inp must be provided when forget is True"
+            flow = flow_inp - x0
+        else:
+            flow = x1 - x0
 
         # only predict what is within the random mask span for infilling
         cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)

@@ -188,6 +188,8 @@ class CustomUnlearningDataset(Dataset):
         self.mel_spec_type = mel_spec_type
         self.preprocessed_mel = preprocessed_mel
 
+        print(f"Speakers to forget: {self.forget_speakers}")
+
         if not preprocessed_mel:
             self.mel_spectrogram = default(
                 mel_spec_module,

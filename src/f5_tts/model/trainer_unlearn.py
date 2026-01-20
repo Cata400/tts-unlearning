@@ -451,63 +451,66 @@ class TrainerUnlearn:  # TODO add info logger
                         dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
                         self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
 
-                    student_loss, student_cond, student_pred = self.model(
-                        mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
-                    )
+                    mel_spec_retain = mel_spec[batch["unlearn_labels"] == 1]
+                    text_inputs_retain = [
+                        text_inputs[i] for i in range(len(text_inputs)) if batch["unlearn_labels"][i] == 1
+                    ]
+                    mel_lengths_retain = mel_lengths[batch["unlearn_labels"] == 1]
 
-                    if batch["unlearn_labels"].sum() != len(
-                        batch["unlearn_labels"]
-                    ):  # if there is at least one forget sample
-                        # If there is a shape error I will have to extract the forget samples out of the batch,
-                        # process them separately, and then recombine the unconditioned mel specs and compute loss (rechange how
-                        # forget loss is computed)
-                        infer_texts = [
-                            text_inputs[i] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[i]
-                            for i in range(len(text_inputs))
+                    if mel_spec_retain.numel() > 0:
+                        retain_loss, retain_cond, retain_pred = self.model.forward_unlearn(
+                            mel_spec_retain,
+                            text=text_inputs_retain,
+                            lens=mel_lengths_retain,
+                            noise_scheduler=self.noise_scheduler,
+                            forget=False,
+                        )
+                    else:
+                        retain_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+                    mel_spec_forget = mel_spec[batch["unlearn_labels"] == -1]
+                    text_inputs_forget = [
+                        text_inputs[i] for i in range(len(text_inputs)) if batch["unlearn_labels"][i] == -1
+                    ]
+                    # mel_lengths_forget = mel_lengths[batch["unlearn_labels"] == -1]
+
+                    if mel_spec_forget.numel() > 0:  # if there is at least one forget sample
+                        infer_texts_forget = [
+                            text_inputs_forget[i]
+                            + ([" "] if isinstance(text_inputs_forget[i], list) else " ")
+                            + text_inputs_forget[i]
+                            for i in range(len(text_inputs_forget))
                         ]
                         with torch.inference_mode():
-                            unconditioned_mel_spec, _ = self.accelerator.unwrap_model(self.model).sample(
-                                cond=torch.zeros_like(mel_spec[:mel_lengths]),  # This is only for the shape
-                                text=infer_texts,
-                                duration=mel_lengths * 2,
+                            unconditioned_mel_spec_forget, _ = self.accelerator.unwrap_model(self.teacher).sample(
+                                cond=torch.zeros_like(mel_spec_forget),  # This is only for the shape
+                                text=infer_texts_forget,
+                                duration=mel_spec_forget.size(1) * 2,
                                 no_ref_audio=True,
                                 steps=nfe_step,
                                 cfg_strength=cfg_strength,
                                 sway_sampling_coef=sway_sampling_coef,
                             )
-                            unconditioned_mel_spec = unconditioned_mel_spec.to(torch.float32)
-                            unconditioned_mel_spec = (
-                                unconditioned_mel_spec[:, mel_lengths:, :].permute(0, 2, 1).to(self.accelerator.device)
-                            )
+                            unconditioned_mel_spec_forget = unconditioned_mel_spec_forget.to(torch.float32)
+                            unconditioned_mel_spec_forget = unconditioned_mel_spec_forget[
+                                :, mel_spec_forget.size(1) :
+                            ].to(self.accelerator.device)
 
-                            teacher_loss, teacher_cond, teacher_pred = self.teacher.forward_forget(
-                                mel_spec,
-                                unconditioned_mel_spec,
-                                text=text_inputs,
-                                lens=mel_lengths,
-                                noise_scheduler=self.noise_scheduler,
-                            )
+                        forget_loss, forget_cond, forget_pred = self.model.forward_unlearn(
+                            mel_spec_forget,
+                            text=text_inputs_forget,
+                            lens=None,
+                            noise_scheduler=self.noise_scheduler,
+                            forget=True,
+                            flow_inp=unconditioned_mel_spec_forget,
+                        )
+
                     else:
-                        teacher_loss = torch.tensor(0.0, device=self.accelerator.device)
+                        forget_loss = torch.tensor(0.0, device=self.accelerator.device)
 
-                    retain_loss = (
-                        student_loss
-                        * (1 + batch["unlearn_labels"])
-                        * 0.5
-                        * len(batch["unlearn_labels"]).float()
-                        / ((batch["unlearn_labels"] + 1).sum() * 0.5 + 1e-8)
+                    loss = (
+                        self.unlearn_params["lambda"] * retain_loss + (1 - self.unlearn_params["lambda"]) * forget_loss
                     )
-                    forget_loss = (
-                        teacher_loss
-                        * (1 - batch["unlearn_labels"])
-                        * 0.5
-                        * len(batch["unlearn_labels"]).float()
-                        / ((1 - batch["unlearn_labels"]).sum() * 0.5 + 1e-8)
-                    )
-                    # Sanity check
-                    print(f"Retain loss: {student_loss * (1 + batch['unlearn_labels'])}")
-                    print(f"Forget loss: {teacher_loss * (1 - batch['unlearn_labels'])}")
-                    loss = self.unlearn_params["alpha"] * retain_loss + (1 - self.unlearn_params["alpha"]) * forget_loss
 
                     self.accelerator.backward(loss)
 

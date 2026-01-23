@@ -10,8 +10,8 @@ repos:
       - id: ruff-check
         name: ruff linter
         args: [--fix]
-      - id: ruff-format
-        name: ruff formatter
+      # - id: ruff-format
+      #   name: ruff formatter
       # - id: ruff
       #   name: ruff sorter
       #   args: [--select, I, --fix]

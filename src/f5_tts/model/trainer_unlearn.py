@@ -163,23 +163,23 @@ class TrainerUnlearn:  # TODO add info logger
             if not os.path.exists(self.checkpoint_path):
                 os.makedirs(self.checkpoint_path)
             if last:
-                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/model_last.pt")
+                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/unlearned_model_last.pt")
                 print(f"Saved last checkpoint at update {update}")
             else:
                 if self.keep_last_n_checkpoints == 0:
                     return
-                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/model_{update}.pt")
+                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/unlearned_model_{update}.pt")
                 if self.keep_last_n_checkpoints > 0:
                     # Updated logic to exclude pretrained model from rotation
                     checkpoints = [
                         f
                         for f in os.listdir(self.checkpoint_path)
-                        if f.startswith("model_")
+                        if f.startswith("unlearned_model_")
                         and not f.startswith("pretrained_")  # Exclude pretrained models
                         and f.endswith(".pt")
-                        and f != "model_last.pt"
+                        and f != "unlearned_model_last.pt"
                     ]
-                    checkpoints.sort(key=lambda x: int(x.split("_")[1].split(".")[0]))
+                    checkpoints.sort(key=lambda x: int(x.split("_")[2].split(".")[0]))
                     while len(checkpoints) > self.keep_last_n_checkpoints:
                         oldest_checkpoint = checkpoints.pop(0)
                         os.remove(os.path.join(self.checkpoint_path, oldest_checkpoint))

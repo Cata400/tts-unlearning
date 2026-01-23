@@ -4,6 +4,7 @@ import random
 import string
 from pathlib import Path
 
+import soundfile as sf
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -50,6 +51,53 @@ def get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path):
         gen_wav = os.path.join(librispeech_test_clean_path, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")
 
         metainfo.append((gen_utt, ref_txt, ref_wav, " " + gen_txt, gen_wav))
+
+    return metainfo
+
+
+def get_processed_libritts_metainfo(processed_libritts_test_path, eval=False):
+    metainfo = []
+    recordings = []
+
+    for speaker in os.listdir(processed_libritts_test_path):
+        speaker_path = os.path.join(processed_libritts_test_path, speaker)
+        if not os.path.isdir(speaker_path):
+            continue
+
+        speaker_recordings = []
+        for file in os.listdir(speaker_path):
+            if file.endswith(".wav"):
+                utt = file[:-4]
+                wav_path = os.path.join(speaker_path, file)
+
+                if sf.info(wav_path).duration < 3 or sf.info(wav_path).duration > 40:
+                    continue
+                txt_path = os.path.join(speaker_path, utt + ".normalized.txt")
+
+                if not os.path.exists(txt_path):
+                    continue
+
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+
+                speaker_recordings.append((utt, text, wav_path))
+        recordings.append(speaker_recordings)
+
+    # Create pairs of prompt and ground truth from different speakers
+    for speaker_recordings in recordings:
+        random.shuffle(speaker_recordings)
+        for i in range(0, len(speaker_recordings) - 1, 2):
+            ref_utt, ref_text, ref_wav = speaker_recordings[i]
+            gen_utt, gen_text, gen_wav = speaker_recordings[i + 1]
+            ref_dur = str(round(sf.info(ref_wav).duration, 2))
+            gen_dur = str(round(sf.info(gen_wav).duration, 2))
+
+            if not eval:
+                metainfo.append((gen_utt, ref_text, ref_wav, " " + gen_text, gen_wav))
+                metainfo.append((ref_utt, gen_text, gen_wav, " " + ref_text, ref_wav))
+            else:
+                metainfo.append((ref_utt, ref_dur, ref_text, gen_utt, gen_dur, gen_text))
+                metainfo.append((gen_utt, gen_dur, gen_text, ref_utt, ref_dur, ref_text))
 
     return metainfo
 
@@ -149,9 +197,15 @@ def get_inference_prompt(
 
         # deal with batch
         assert infer_batch_size > 0, "infer_batch_size should be greater than 0."
-        assert min_tokens <= total_mel_len <= max_tokens, (
-            f"Audio {utt} has duration {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]."
-        )
+        try:
+            assert (
+                min_tokens <= total_mel_len <= max_tokens
+            ), f"Audio {utt} total duration (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]."
+        except AssertionError:
+            print(
+                f"Warning: Audio {utt} total duration (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]. Skipped."
+            )
+            continue
         bucket_i = math.floor((total_mel_len - min_tokens) / (max_tokens - min_tokens + 1) * num_buckets)
 
         utts[bucket_i].append(utt)
@@ -183,7 +237,14 @@ def get_inference_prompt(
                 ref_mel_lens[bucket_i],
                 total_mel_lens[bucket_i],
                 final_text_list[bucket_i],
-            ) = [], [], [], [], [], []
+            ) = (
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+            )
 
     # add residual
     for bucket_i, bucket_frames in enumerate(batch_accum):
@@ -263,6 +324,40 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
 
         ref_spk_id, ref_chaptr_id, _ = ref_utt.split("-")
         ref_wav = os.path.join(librispeech_test_clean_path, ref_spk_id, ref_chaptr_id, ref_utt + ".flac")
+
+        test_set_.append((gen_wav, ref_wav, gen_txt))
+
+    num_jobs = len(gpus)
+    if num_jobs == 1:
+        return [(gpus[0], test_set_)]
+
+    wav_per_job = len(test_set_) // num_jobs + 1
+    test_set = []
+    for i in range(num_jobs):
+        test_set.append((gpus[i], test_set_[i * wav_per_job : (i + 1) * wav_per_job]))
+
+    return test_set
+
+
+def get_libritts_test(gen_wav_dir, gpus, processed_libritts_path, eval_ground_truth=False):
+    lines = get_processed_libritts_metainfo(processed_libritts_path, eval=True)
+    print(lines[0])
+
+    test_set_ = []
+    for line in tqdm(lines):
+        ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = line
+
+        if eval_ground_truth:
+            gen_spk_id, gen_chaptr_id, _, _ = gen_utt.split("_")
+            gen_wav = os.path.join(processed_libritts_path, gen_spk_id, gen_utt + ".wav")
+        else:
+            if not os.path.exists(os.path.join(gen_wav_dir, gen_utt + ".wav")):
+                print(f"Generated wav not found: {gen_utt}, skipping...")
+                continue
+            gen_wav = os.path.join(gen_wav_dir, gen_utt + ".wav")
+
+        ref_spk_id, ref_chaptr_id, _, _ = ref_utt.split("_")
+        ref_wav = os.path.join(processed_libritts_path, ref_spk_id, ref_utt + ".wav")
 
         test_set_.append((gen_wav, ref_wav, gen_txt))
 

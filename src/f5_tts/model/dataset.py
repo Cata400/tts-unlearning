@@ -255,6 +255,34 @@ class CustomUnlearningDataset(Dataset):
         }
 
 
+def build_unlearning_sample_weights(dataset, class_weights):
+    weights = []
+
+    for i in range(len(dataset.data)):
+        row = dataset.data[i]
+        speaker_id = row.get("speaker_id", None)
+
+        if speaker_id is not None and speaker_id in dataset.forget_speakers:
+            weights.append(class_weights[-1])
+        else:
+            weights.append(class_weights[1])
+
+    return torch.DoubleTensor(weights)
+
+
+def get_dataset_num_speakers(dataset):
+    speaker_ids = set()
+
+    for i in range(len(dataset.data)):
+        row = dataset.data[i]
+        speaker_id = row.get("speaker_id", None)
+
+        if speaker_id is not None:
+            speaker_ids.add(speaker_id)
+
+    return len(speaker_ids)
+
+
 # Dynamic Batch Sampler
 class DynamicBatchSampler(Sampler[list[int]]):
     """Extension of Sampler that will do the following:
@@ -328,6 +356,118 @@ class DynamicBatchSampler(Sampler[list[int]]):
 
     def __len__(self):
         return len(self.batches)
+
+
+# Dynamic Unlearning Batch Sampler
+class DynamicUnlearningBatchSampler(Sampler[list[int]]):
+    """Dynamic batch sampler that prioritizes forget samples first.
+
+    The first batches are guaranteed to contain at least one forget sample
+    (unlearn_label == -1) until all forget samples are used. Remaining batches
+    contain only retain samples (unlearn_label == 1).
+    """
+
+    def __init__(
+        self, sampler: Sampler[int], frames_threshold: int, max_samples=0, random_seed=None, drop_residual: bool = False
+    ):
+        self.sampler = sampler
+        self.frames_threshold = frames_threshold
+        self.max_samples = max_samples
+        self.random_seed = random_seed
+        self.epoch = 0
+
+        data_source = self.sampler.data_source
+        if not hasattr(data_source, "data") or not hasattr(data_source, "forget_speakers"):
+            raise ValueError("DynamicUnlearningB1600atchSampler requires a dataset with data and forget_speakers.")
+
+        forget_speakers = set(data_source.forget_speakers)
+        forget_indices = []
+        retain_indices = []
+
+        for idx in tqdm(
+            self.sampler, desc="Sorting with sampler... if slow, check whether dataset is provided with duration"
+        ):
+            frame_len = data_source.get_frame_len(idx)
+            row = data_source.data[idx]
+            speaker_id = row.get("speaker_id", None)
+            if speaker_id in forget_speakers:
+                forget_indices.append((idx, frame_len))
+            else:
+                retain_indices.append((idx, frame_len))
+
+        forget_indices.sort(key=lambda elem: elem[1])
+        retain_indices.sort(key=lambda elem: elem[1])
+
+        forget_batches = []
+        retain_batches = []
+
+        retain_pos = 0
+        for idx, frame_len in tqdm(
+            forget_indices, desc=f"Creating unlearning batches with {frames_threshold} audio frames per gpu"
+        ):
+            if frame_len > self.frames_threshold:
+                continue
+
+            batch = [idx]
+            batch_frames = frame_len
+
+            while retain_pos < len(retain_indices):
+                retain_idx, retain_frame_len = retain_indices[retain_pos]
+                if batch_frames + retain_frame_len <= self.frames_threshold and (
+                    max_samples == 0 or len(batch) < max_samples
+                ):
+                    batch.append(retain_idx)
+                    batch_frames += retain_frame_len
+                    retain_pos += 1
+                else:
+                    break
+
+            if len(batch) > 0:
+                forget_batches.append(batch)
+
+        # Build remaining retain-only batches
+        batch = []
+        batch_frames = 0
+        for idx, frame_len in retain_indices[retain_pos:]:
+            if batch_frames + frame_len <= self.frames_threshold and (max_samples == 0 or len(batch) < max_samples):
+                batch.append(idx)
+                batch_frames += frame_len
+            else:
+                if len(batch) > 0:
+                    retain_batches.append(batch)
+                if frame_len <= self.frames_threshold:
+                    batch = [idx]
+                    batch_frames = frame_len
+                else:
+                    batch = []
+                    batch_frames = 0
+
+        if not drop_residual and len(batch) > 0:
+            retain_batches.append(batch)
+
+        self.forget_batches = forget_batches
+        self.retain_batches = retain_batches
+
+        # Ensure even batches with accelerate BatchSamplerShard cls under frame_per_batch setting
+        self.drop_last = True
+
+    def set_epoch(self, epoch: int) -> None:
+        """Sets the epoch for this sampler."""
+        self.epoch = epoch
+
+    def __iter__(self):
+        if self.random_seed is not None:
+            g = torch.Generator()
+            g.manual_seed(self.random_seed + self.epoch)
+            forget_order = torch.randperm(len(self.forget_batches), generator=g).tolist()
+            retain_order = torch.randperm(len(self.retain_batches), generator=g).tolist()
+            batches = [self.forget_batches[i] for i in forget_order] + [self.retain_batches[i] for i in retain_order]
+        else:
+            batches = self.forget_batches + self.retain_batches
+        return iter(batches)
+
+    def __len__(self):
+        return len(self.forget_batches) + len(self.retain_batches)
 
 
 # Load dataset
@@ -436,27 +576,50 @@ def collate_fn(batch):
 
 
 def collate_fn_unlearning(batch):
-    mel_specs = [item["mel_spec"].squeeze(0) for item in batch]
-    mel_lengths = torch.LongTensor([spec.shape[-1] for spec in mel_specs])
-    max_mel_length = mel_lengths.amax()
+    mel_specs_retain = [item["mel_spec"].squeeze(0) for item in batch if item["unlearn_label"] == 1]
+    mel_lengths_retain = torch.LongTensor([spec.shape[-1] for spec in mel_specs_retain])
+    max_mel_length_retain = mel_lengths_retain.amax() if mel_lengths_retain.numel() > 0 else 0
 
-    padded_mel_specs = []
-    for spec in mel_specs:
-        padding = (0, max_mel_length - spec.size(-1))
+    padded_mel_specs_retain = []
+    for spec in mel_specs_retain:
+        padding = (0, max_mel_length_retain - spec.size(-1))
         padded_spec = F.pad(spec, padding, value=0)
-        padded_mel_specs.append(padded_spec)
+        padded_mel_specs_retain.append(padded_spec)
 
-    mel_specs = torch.stack(padded_mel_specs)
+    mel_specs_retain = (
+        torch.stack(padded_mel_specs_retain) if len(padded_mel_specs_retain) > 0 else torch.empty((0, 0, 0))
+    )
 
-    text = [item["text"] for item in batch]
-    text_lengths = torch.LongTensor([len(item) for item in text])
+    text_retain = [item["text"] for item in batch if item["unlearn_label"] == 1]
+    text_lengths_retain = torch.LongTensor([len(item) for item in text_retain])
+
+    mel_specs_forget = [item["mel_spec"].squeeze(0) for item in batch if item["unlearn_label"] == -1]
+    mel_lengths_forget = torch.LongTensor([spec.shape[-1] for spec in mel_specs_forget])
+    max_mel_length_forget = mel_lengths_forget.amax() if mel_lengths_forget.numel() > 0 else 0
+
+    padded_mel_specs_forget = []
+    for spec in mel_specs_forget:
+        padding = (0, max_mel_length_forget - spec.size(-1))
+        padded_spec = F.pad(spec, padding, value=0)
+        padded_mel_specs_forget.append(padded_spec)
+
+    mel_specs_forget = (
+        torch.stack(padded_mel_specs_forget) if len(padded_mel_specs_forget) > 0 else torch.empty((0, 0, 0))
+    )
+
+    text_forget = [item["text"] for item in batch if item["unlearn_label"] == -1]
+    text_lengths_forget = torch.LongTensor([len(item) for item in text_forget])
 
     unlearn_labels = torch.LongTensor([item["unlearn_label"] for item in batch])
 
     return dict(
-        mel=mel_specs,
-        mel_lengths=mel_lengths,  # records for padding mask
-        text=text,
-        text_lengths=text_lengths,
+        mel_retain=mel_specs_retain,
+        mel_lengths_retain=mel_lengths_retain,  # records for padding mask
+        text_retain=text_retain,
+        text_lengths_retain=text_lengths_retain,
+        mel_forget=mel_specs_forget,
+        mel_lengths_forget=mel_lengths_forget,  # records for padding mask
+        text_forget=text_forget,
+        text_lengths_forget=text_lengths_forget,
         unlearn_labels=unlearn_labels,
     )

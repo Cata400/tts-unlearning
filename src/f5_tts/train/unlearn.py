@@ -92,6 +92,7 @@ def main(model_cfg):
         local_vocoder_path=model_cfg.model.vocoder.local_path,
         model_cfg_dict=OmegaConf.to_container(model_cfg, resolve=True),
         unlearn_params=unlearn_params,
+        forget_speakers=model_cfg.unlearn.forget_speakers,
     )
 
     train_dataset = load_dataset(

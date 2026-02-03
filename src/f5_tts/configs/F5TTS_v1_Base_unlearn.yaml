@@ -4,8 +4,8 @@ hydra:
 
 datasets:
   name: LibriTTS_100_train_intra_speaker_split_0.2  # dataset name
-  batch_size_per_gpu: 2048
-  batch_size_type: frame  # frame | sample
+  batch_size_per_gpu: 2048 # 2048
+  batch_size_type: unlearn_frame  # frame | sample | unlearn_frame
   max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
   num_workers: 16
 

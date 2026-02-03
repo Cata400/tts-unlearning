@@ -16,7 +16,11 @@ from torch.utils.data import DataLoader, Dataset, SequentialSampler
 from tqdm import tqdm
 
 from f5_tts.model import CFM
-from f5_tts.model.dataset import DynamicBatchSampler, collate_fn_unlearning
+from f5_tts.model.dataset import (
+    DynamicBatchSampler,
+    DynamicUnlearningBatchSampler,
+    collate_fn_unlearning,
+)
 from f5_tts.model.utils import default, exists
 
 # trainer unlearn
@@ -55,6 +59,7 @@ class TrainerUnlearn:  # TODO add info logger
         local_vocoder_path: str = "",  # local vocoder path
         model_cfg_dict: dict = dict(),  # training config
         unlearn_params: dict = dict(),  # unlearning params
+        forget_speakers: list = [],  # list of speakers to forget
     ):
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
@@ -145,6 +150,7 @@ class TrainerUnlearn:  # TODO add info logger
         self.teacher, self.model, self.optimizer = self.accelerator.prepare(self.teacher, self.model, self.optimizer)
 
         self.unlearn_params = unlearn_params
+        self.forget_speakers = forget_speakers
 
     @property
     def is_main(self):
@@ -381,6 +387,26 @@ class TrainerUnlearn:  # TODO add info logger
                 persistent_workers=True,
                 batch_sampler=batch_sampler,
             )
+            print(f"Total {len(train_dataloader)} batches per epoch with frame-based batch size.")
+        elif self.batch_size_type == "unlearn_frame":
+            self.accelerator.even_batches = False
+            sampler = SequentialSampler(train_dataset)
+            batch_sampler = DynamicUnlearningBatchSampler(
+                sampler,
+                self.batch_size_per_gpu,
+                max_samples=self.max_samples,
+                random_seed=resumable_with_seed,  # This enables reproducible shuffling
+                drop_residual=False,
+            )
+            train_dataloader = DataLoader(
+                train_dataset,
+                collate_fn=collate_fn_unlearning,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=True,
+                batch_sampler=batch_sampler,
+            )
+            print(f"Total {len(train_dataloader)} batches per epoch with frame-based batch size.")
         else:
             raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
 
@@ -442,20 +468,14 @@ class TrainerUnlearn:  # TODO add info logger
 
             for batch in current_dataloader:
                 with self.accelerator.accumulate(self.model):
-                    text_inputs = batch["text"]
-                    mel_spec = batch["mel"].permute(0, 2, 1)
-                    mel_lengths = batch["mel_lengths"]
+                    text_inputs_retain = batch["text_retain"]
+                    text_inputs_forget = batch["text_forget"]
 
-                    # TODO. add duration predictor training
-                    if self.duration_predictor is not None and self.accelerator.is_local_main_process:
-                        dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
-                        self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
+                    mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
+                    mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
 
-                    mel_spec_retain = mel_spec[batch["unlearn_labels"] == 1]
-                    text_inputs_retain = [
-                        text_inputs[i] for i in range(len(text_inputs)) if batch["unlearn_labels"][i] == 1
-                    ]
-                    mel_lengths_retain = mel_lengths[batch["unlearn_labels"] == 1]
+                    mel_lengths_retain = batch["mel_lengths_retain"]
+                    mel_lengths_forget = batch["mel_lengths_forget"]
 
                     if mel_spec_retain.numel() > 0:
                         retain_loss, retain_cond, retain_pred = self.model.forward_unlearn(
@@ -467,12 +487,6 @@ class TrainerUnlearn:  # TODO add info logger
                         )
                     else:
                         retain_loss = torch.tensor(0.0, device=self.accelerator.device)
-
-                    mel_spec_forget = mel_spec[batch["unlearn_labels"] == -1]
-                    text_inputs_forget = [
-                        text_inputs[i] for i in range(len(text_inputs)) if batch["unlearn_labels"][i] == -1
-                    ]
-                    # mel_lengths_forget = mel_lengths[batch["unlearn_labels"] == -1]
 
                     if mel_spec_forget.numel() > 0:  # if there is at least one forget sample
                         infer_texts_forget = [
@@ -499,7 +513,7 @@ class TrainerUnlearn:  # TODO add info logger
                         forget_loss, forget_cond, forget_pred = self.model.forward_unlearn(
                             mel_spec_forget,
                             text=text_inputs_forget,
-                            lens=None,
+                            lens=mel_lengths_forget,
                             noise_scheduler=self.noise_scheduler,
                             forget=True,
                             flow_inp=unconditioned_mel_spec_forget,
@@ -543,14 +557,16 @@ class TrainerUnlearn:  # TODO add info logger
                 if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(global_update)
 
-                    if self.log_samples and self.accelerator.is_local_main_process:
-                        ref_audio_len = mel_lengths[0]
+                    if self.log_samples and self.accelerator.is_local_main_process:  # TODO change this at some point
+                        ref_audio_len = mel_lengths_retain[0]
                         infer_text = [
-                            text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
+                            text_inputs_retain[0]
+                            + ([" "] if isinstance(text_inputs_retain[0], list) else " ")
+                            + text_inputs_retain[0]
                         ]
                         with torch.inference_mode():
                             generated, _ = self.accelerator.unwrap_model(self.model).sample(
-                                cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
+                                cond=mel_spec_retain[0][:ref_audio_len].unsqueeze(0),
                                 text=infer_text,
                                 duration=ref_audio_len * 2,
                                 steps=nfe_step,

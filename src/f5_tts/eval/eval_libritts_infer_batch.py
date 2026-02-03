@@ -165,6 +165,7 @@ def main():
         else:
             raise ValueError("The checkpoint does not exist or cannot be found in given location.")
 
+    print(f"Loading model checkpoint from {ckpt_path}")
     dtype = torch.float32 if mel_spec_type == "bigvgan" else None
     model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
 

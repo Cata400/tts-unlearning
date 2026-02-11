@@ -39,11 +39,12 @@ fi
 
 source /etc/profile.d/modules.sh
 module load anaconda/3
-module load cuda/12.4-9.1
+module load cuda/12.6-9.5
 conda activate f5-tts
 
-if N_GPUS -gt 1
+if [ "$N_GPUS" -gt 1 ]
 then
-    accelerate launch ../eval/eval_libritts_infer_batch.py --exp_name $EXPNAME --ckpt_step $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
+    accelerate launch ./eval/eval_libritts_infer_batch.py --exp_name $EXPNAME --ckpt_step $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
 else
-    python3 ../eval/eval_libritts_infer_batch.py --exp_name $EXPNAME --ckpt_step $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
+    python3 ./eval/eval_libritts_infer_batch.py --exp_name $EXPNAME --ckpt_step $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
+fi

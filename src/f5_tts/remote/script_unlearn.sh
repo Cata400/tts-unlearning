@@ -30,11 +30,12 @@ fi
 
 source /etc/profile.d/modules.sh
 module load anaconda/3
-module load cuda/12.4-9.1
+module load cuda/12.6-9.5
 conda activate f5-tts
 
-if N_GPUS -gt 1
+if [ "$N_GPUS" -gt 1 ]
 then
-    accelerate launch ../train/unlearn.py --config $CONFIG
+    accelerate launch ./train/unlearn.py --config-name "$CONFIG"
 else
-    python3 ../train/unlearn.py $CONFIG
+    python3 ./train/unlearn.py --config-name "$CONFIG"
+fi

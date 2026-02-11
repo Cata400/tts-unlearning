@@ -23,13 +23,12 @@ from f5_tts.model import CFM
 from f5_tts.model.dataset import (
     DynamicBatchSampler,
     DynamicUnlearningBatchSampler,
+    BalancedUnlearningSampleBatchSampler,
     build_unlearning_sample_weights,
     collate_fn_unlearning,
     get_dataset_num_speakers,
 )
 from f5_tts.model.utils import default, exists
-
-# trainer unlearn
 
 
 class TrainerUnlearn:  # TODO add info logger
@@ -374,7 +373,7 @@ class TrainerUnlearn:  # TODO add info logger
                 shuffle=True,
                 generator=generator,
             )
-        if self.batch_size_type == "unlearn_sample":
+        elif self.batch_size_type == "unlearn_sample":
             num_speakers = get_dataset_num_speakers(train_dataset)
             unlearning_class_weights = {
                 1: num_speakers / (num_speakers - len(self.forget_speakers)),
@@ -396,8 +395,22 @@ class TrainerUnlearn:  # TODO add info logger
                 pin_memory=True,
                 persistent_workers=True,
                 batch_size=self.batch_size_per_gpu,
-                shuffle=True,
+                sampler=sampler,
                 generator=generator,
+            )
+        elif self.batch_size_type == "balanced_unlearn_sample":
+            batch_sampler = BalancedUnlearningSampleBatchSampler(
+                train_dataset,
+                batch_size=self.batch_size_per_gpu,
+                random_seed=resumable_with_seed,
+            )
+            train_dataloader = DataLoader(
+                train_dataset,
+                collate_fn=collate_fn_unlearning,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=True,
+                batch_sampler=batch_sampler,
             )
         elif self.batch_size_type == "frame":
             self.accelerator.even_batches = False
@@ -438,7 +451,11 @@ class TrainerUnlearn:  # TODO add info logger
             )
             print(f"Total {len(train_dataloader)} batches per epoch with frame-based batch size.")
         else:
-            raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
+            raise ValueError(
+                "batch_size_type must be one of "
+                "'sample', 'unlearn_sample', 'balanced_unlearn_sample', 'frame', or 'unlearn_frame', "
+                f"but received {self.batch_size_type}"
+            )
 
         #  accelerator.prepare() dispatches batches to devices;
         #  which means the length of dataloader calculated before, should consider the number of devices

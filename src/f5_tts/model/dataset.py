@@ -283,6 +283,86 @@ def get_dataset_num_speakers(dataset):
     return len(speaker_ids)
 
 
+class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
+    """Batch sampler with a fixed 50/50 retain/forget composition per batch.
+
+    Retain samples are iterated once per epoch (shuffled). Forget samples are
+    sampled with replacement, so they can appear multiple times per epoch.
+    """
+
+    def __init__(self, dataset: Dataset, batch_size: int, random_seed: int | None = None):
+        if batch_size % 2 != 0:
+            raise ValueError(
+                f"balanced_unlearn_sample requires an even batch_size_per_gpu, but received {batch_size}"
+            )
+        if not hasattr(dataset, "data") or not hasattr(dataset, "forget_speakers"):
+            raise ValueError(
+                "balanced_unlearn_sample requires a dataset with `data` and `forget_speakers` attributes."
+            )
+
+        forget_speakers = set(dataset.forget_speakers)
+        self.forget_indices = []
+        self.retain_indices = []
+        for idx in range(len(dataset.data)):
+            speaker_id = dataset.data[idx].get("speaker_id", None)
+            if speaker_id in forget_speakers:
+                self.forget_indices.append(idx)
+            else:
+                self.retain_indices.append(idx)
+
+        if len(self.forget_indices) == 0:
+            raise ValueError("balanced_unlearn_sample requires at least one forget sample.")
+        if len(self.retain_indices) == 0:
+            raise ValueError("balanced_unlearn_sample requires at least one retain sample.")
+
+        self.half_batch_size = batch_size // 2
+        self.random_seed = random_seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        generator = torch.Generator()
+        if self.random_seed is not None:
+            generator.manual_seed(self.random_seed + self.epoch)
+            retain_perm = torch.randperm(len(self.retain_indices), generator=generator).tolist()
+        else:
+            retain_perm = torch.randperm(len(self.retain_indices)).tolist()
+        shuffled_retain = [self.retain_indices[i] for i in retain_perm]
+
+        num_batches = len(self)
+        for batch_idx in range(num_batches):
+            start = batch_idx * self.half_batch_size
+            retain_batch = shuffled_retain[start : start + self.half_batch_size]
+
+            if self.random_seed is not None:
+                forget_positions = torch.randint(
+                    low=0,
+                    high=len(self.forget_indices),
+                    size=(self.half_batch_size,),
+                    generator=generator,
+                ).tolist()
+            else:
+                forget_positions = torch.randint(
+                    low=0,
+                    high=len(self.forget_indices),
+                    size=(self.half_batch_size,),
+                ).tolist()
+            forget_batch = [self.forget_indices[i] for i in forget_positions]
+
+            batch = retain_batch + forget_batch
+            if self.random_seed is not None:
+                batch_perm = torch.randperm(len(batch), generator=generator).tolist()
+            else:
+                batch_perm = torch.randperm(len(batch)).tolist()
+            yield [batch[i] for i in batch_perm]
+
+    def __len__(self):
+        # Keep strict 50/50 composition by only emitting full half-batches.
+        return len(self.retain_indices) // self.half_batch_size
+
+
 # Dynamic Batch Sampler
 class DynamicBatchSampler(Sampler[list[int]]):
     """Extension of Sampler that will do the following:

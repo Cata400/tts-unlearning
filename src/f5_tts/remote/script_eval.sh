@@ -35,10 +35,10 @@ fi
 
 source /etc/profile.d/modules.sh
 module load anaconda/3
-module load cuda/12.4-9.1
+module load cuda/12.6-9.5
 conda activate f5-tts
 
 echo "Evaluating SIM"
-python3 ../eval/eval_libritts.py --eval_task sim --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
+python3 ./eval/eval_libritts.py --eval_task sim --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
 echo "Evaluating WER"
-python3 ../eval/eval_libritts.py --eval_task wer --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
+python3 ./eval/eval_libritts.py --eval_task wer --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH

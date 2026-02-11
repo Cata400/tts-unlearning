@@ -614,11 +614,11 @@ def collate_fn_unlearning(batch):
 
     return dict(
         mel_retain=mel_specs_retain,
-        mel_lengths_retain=mel_lengths_retain,  # records for padding mask
+        mel_lengths_retain=mel_lengths_retain,
         text_retain=text_retain,
         text_lengths_retain=text_lengths_retain,
         mel_forget=mel_specs_forget,
-        mel_lengths_forget=mel_lengths_forget,  # records for padding mask
+        mel_lengths_forget=mel_lengths_forget,
         text_forget=text_forget,
         text_lengths_forget=text_lengths_forget,
         unlearn_labels=unlearn_labels,

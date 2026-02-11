@@ -4,8 +4,8 @@ hydra:
 
 datasets:
   name: LibriTTS_100_train_intra_speaker_split_0.2  # dataset name
-  batch_size_per_gpu: 2048 # 2048
-  batch_size_type: unlearn_frame  # frame | sample | unlearn_frame
+  batch_size_per_gpu: 1 # 2048
+  batch_size_type: unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample
   max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
   num_workers: 16
 
@@ -49,7 +49,7 @@ model:
 ckpts:
   logger: tensorboard  # wandb | tensorboard | null
   log_samples: True  # infer random sample per save checkpoint. wip, normal to fail with extra long samples
-  save_per_updates: 10000  # save checkpoint per updates
+  save_per_updates: 100000  # save checkpoint per updates
   keep_last_n_checkpoints: -1  # -1 to keep all, 0 to not save intermediate, > 0 to keep last N checkpoints
   last_per_updates: 5000  # save last checkpoint per updates
   save_dir: ckpts/${model.name}_${model.mel_spec.mel_spec_type}_${model.tokenizer}_${datasets.name}

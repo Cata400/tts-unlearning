@@ -5,21 +5,27 @@ import math
 import os
 
 import torch
-import torchaudio
 import wandb
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from ema_pytorch import EMA
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
-from torch.utils.data import DataLoader, Dataset, SequentialSampler
+from torch.utils.data import (
+    DataLoader,
+    Dataset,
+    SequentialSampler,
+    WeightedRandomSampler,
+)
 from tqdm import tqdm
 
 from f5_tts.model import CFM
 from f5_tts.model.dataset import (
     DynamicBatchSampler,
     DynamicUnlearningBatchSampler,
+    build_unlearning_sample_weights,
     collate_fn_unlearning,
+    get_dataset_num_speakers,
 )
 from f5_tts.model.utils import default, exists
 
@@ -340,15 +346,14 @@ class TrainerUnlearn:  # TODO add info logger
         if self.log_samples:
             from f5_tts.infer.utils_infer import (
                 cfg_strength,
-                load_vocoder,
                 nfe_step,
                 sway_sampling_coef,
             )
 
-            vocoder = load_vocoder(
-                vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
-            )
-            target_sample_rate = self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
+            # vocoder = load_vocoder(
+            #     vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
+            # )
+            self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
             log_samples_path = f"{self.checkpoint_path}/samples"
             os.makedirs(log_samples_path, exist_ok=True)
 
@@ -359,6 +364,31 @@ class TrainerUnlearn:  # TODO add info logger
             generator = None
 
         if self.batch_size_type == "sample":
+            train_dataloader = DataLoader(
+                train_dataset,
+                collate_fn=collate_fn_unlearning,
+                num_workers=num_workers,
+                pin_memory=True,
+                persistent_workers=True,
+                batch_size=self.batch_size_per_gpu,
+                shuffle=True,
+                generator=generator,
+            )
+        if self.batch_size_type == "unlearn_sample":
+            num_speakers = get_dataset_num_speakers(train_dataset)
+            unlearning_class_weights = {
+                1: num_speakers / (num_speakers - len(self.forget_speakers)),
+                -1: num_speakers / len(self.forget_speakers),
+            }
+            unlearning_sample_weights = build_unlearning_sample_weights(
+                train_dataset,
+                unlearning_class_weights,
+            )
+            sampler = WeightedRandomSampler(
+                unlearning_sample_weights,
+                num_samples=len(unlearning_sample_weights),
+                replacement=True,
+            )
             train_dataloader = DataLoader(
                 train_dataset,
                 collate_fn=collate_fn_unlearning,
@@ -500,6 +530,7 @@ class TrainerUnlearn:  # TODO add info logger
                                 cond=torch.zeros_like(mel_spec_forget),  # This is only for the shape
                                 text=infer_texts_forget,
                                 duration=mel_spec_forget.size(1) * 2,
+                                max_duration=mel_spec_forget.size(1) * 2,
                                 no_ref_audio=True,
                                 steps=nfe_step,
                                 cfg_strength=cfg_strength,
@@ -558,38 +589,39 @@ class TrainerUnlearn:  # TODO add info logger
                     self.save_checkpoint(global_update)
 
                     if self.log_samples and self.accelerator.is_local_main_process:  # TODO change this at some point
-                        ref_audio_len = mel_lengths_retain[0]
-                        infer_text = [
-                            text_inputs_retain[0]
-                            + ([" "] if isinstance(text_inputs_retain[0], list) else " ")
-                            + text_inputs_retain[0]
-                        ]
-                        with torch.inference_mode():
-                            generated, _ = self.accelerator.unwrap_model(self.model).sample(
-                                cond=mel_spec_retain[0][:ref_audio_len].unsqueeze(0),
-                                text=infer_text,
-                                duration=ref_audio_len * 2,
-                                steps=nfe_step,
-                                cfg_strength=cfg_strength,
-                                sway_sampling_coef=sway_sampling_coef,
-                            )
-                            generated = generated.to(torch.float32)
-                            gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
-                            ref_mel_spec = batch["mel"][0].unsqueeze(0)
-                            if self.vocoder_name == "vocos":
-                                gen_audio = vocoder.decode(gen_mel_spec).cpu()
-                                ref_audio = vocoder.decode(ref_mel_spec).cpu()
-                            elif self.vocoder_name == "bigvgan":
-                                gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
-                                ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
+                        pass
+                        # ref_audio_len = mel_lengths_retain[0]
+                        # infer_text = [
+                        #     text_inputs_retain[0]
+                        #     + ([" "] if isinstance(text_inputs_retain[0], list) else " ")
+                        #     + text_inputs_retain[0]
+                        # ]
+                        # with torch.inference_mode():
+                        #     generated, _ = self.accelerator.unwrap_model(self.model).sample(
+                        #         cond=mel_spec_retain[0][:ref_audio_len].unsqueeze(0),
+                        #         text=infer_text,
+                        #         duration=ref_audio_len * 2,
+                        #         steps=nfe_step,
+                        #         cfg_strength=cfg_strength,
+                        #         sway_sampling_coef=sway_sampling_coef,
+                        #     )
+                        #     generated = generated.to(torch.float32)
+                        #     gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                        #     ref_mel_spec = batch["mel"][0].unsqueeze(0)
+                        #     if self.vocoder_name == "vocos":
+                        #         gen_audio = vocoder.decode(gen_mel_spec).cpu()
+                        #         ref_audio = vocoder.decode(ref_mel_spec).cpu()
+                        #     elif self.vocoder_name == "bigvgan":
+                        #         gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
+                        #         ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
 
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
-                        )
-                        torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
-                        )
-                        self.model.train()
+                        # torchaudio.save(
+                        #     f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
+                        # )
+                        # torchaudio.save(
+                        #     f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
+                        # )
+                        # self.model.train()
 
         self.save_checkpoint(global_update, last=True)
 

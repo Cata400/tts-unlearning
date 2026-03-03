@@ -77,6 +77,7 @@ def main():
     model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/{exp_name}.yaml")))
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
+    ckpt_dir_name = model_cfg.ckpts.save_dir.split("/")[-1]
 
     dataset_name = model_cfg.datasets.name
     tokenizer = model_cfg.model.tokenizer
@@ -98,7 +99,7 @@ def main():
     # path to save genereted wavs
     output_dir = (
         f"{rel_path}/"
-        f"results/{exp_name}_{ckpt_step}/{testset}/"
+        f"results/{ckpt_dir_name}_{ckpt_step}/{testset}/"
         f"seed{seed}_{ode_method}_nfe{nfe_step}_{mel_spec_type}"
         f"{f'_ss{sway_sampling_coef}' if sway_sampling_coef else ''}"
         f"_cfg{cfg_strength}_speed{speed}"
@@ -157,7 +158,8 @@ def main():
         ckpt_path = ckpt_prefix + ".safetensors"
     else:
         print("Loading from self-organized training checkpoints rather than released pretrained.")
-        ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/unlearned_model_{ckpt_step}"
+        # ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/unlearned_model_{ckpt_step}"
+        ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/pretrained_model_1250000"
         if os.path.exists(ckpt_prefix + ".pt"):
             ckpt_path = ckpt_prefix + ".pt"
         elif os.path.exists(ckpt_prefix + ".safetensors"):
@@ -171,6 +173,13 @@ def main():
 
     if not os.path.exists(output_dir) and accelerator.is_main_process:
         os.makedirs(output_dir)
+
+    # write metainfo to output dir for debugging and reference        
+    if accelerator.is_main_process:
+        with open(f"{output_dir}/metainfo.txt", "w") as f:
+            for line in metainfo:
+                gen_utt, ref_text, ref_wav, gen_text, gen_wav = line
+                f.write(f"{gen_utt}\t{ref_text}\t{ref_wav}\t{gen_text}\t{gen_wav}\n")
 
     # start batch inference
     accelerator.wait_for_everyone()

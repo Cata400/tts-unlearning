@@ -44,7 +44,7 @@ conda activate f5-tts
 
 if [ "$N_GPUS" -gt 1 ]
 then
-    accelerate launch ./eval/eval_libritts_infer_batch.py --exp_name $EXPNAME --ckpt_step $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
+    accelerate launch ./eval/eval_libritts_infer_batch.py --expname $EXPNAME --ckptstep $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
 else
-    python3 ./eval/eval_libritts_infer_batch.py --exp_name $EXPNAME --ckpt_step $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
+    python3 ./eval/eval_libritts_infer_batch.py --expname $EXPNAME --ckptstep $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH
 fi

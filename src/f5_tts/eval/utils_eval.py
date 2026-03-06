@@ -8,7 +8,9 @@ import soundfile as sf
 import torch
 import torch.nn.functional as F
 import torchaudio
+from speechbrain.inference.speaker import EncoderClassifier
 from tqdm import tqdm
+from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
 
 from f5_tts.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
 from f5_tts.model.modules import MelSpec
@@ -82,6 +84,11 @@ def get_processed_libritts_metainfo(processed_libritts_test_path, eval=False):
 
                 speaker_recordings.append((utt, text, wav_path))
         recordings.append(speaker_recordings)
+
+    ### For Debugging
+    # recordings_all = [speaker for speaker_recording in recordings for speaker in speaker_recording]
+    # random.shuffle(recordings_all)
+    # recordings = [recordings_all[i: i + 10] for i in range(0, len(recordings_all), 10)]
 
     # Create pairs of prompt and ground truth from different speakers
     for speaker_recordings in recordings:
@@ -203,7 +210,7 @@ def get_inference_prompt(
             ), f"Audio {utt} total duration (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]."
         except AssertionError:
             print(
-                f"Warning: Audio {utt} total duration (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]. Skipped."
+                f"Warning: Audio {utt} total dura, ```<checkpoint>``` is the model checkpointtion (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]. Skipped."
             )
             continue
         bucket_i = math.floor((total_mel_len - min_tokens) / (max_tokens - min_tokens + 1) * num_buckets)
@@ -339,22 +346,101 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
     return test_set
 
 
+def shuffle_utterances(data_list):
+    # Step 1: Extract all (utt, dur, txt) triplets into a single list
+    all_items = []
+
+    for line in data_list:
+        # Strip the newline character(s) and split by tab
+        parts = line.rstrip("\r\n").split("\t")
+
+        # Ensure we have exactly 6 elements before unpacking
+        if len(parts) == 6:
+            ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = parts
+
+            # Add both ref and gen as distinct items
+            all_items.append((ref_utt, ref_dur, ref_txt))
+            all_items.append((gen_utt, gen_dur, gen_txt))
+
+    # Step 2: Shuffle the combined list of items
+    random.shuffle(all_items)
+
+    # Step 3: Rearrange them back into the original format
+    rearranged_list = []
+
+    # Iterate through the shuffled list in steps of 2
+    for i in range(0, len(all_items), 2):
+        item1 = all_items[i]
+        item2 = all_items[i + 1]
+
+        # Combine the two items, join with tabs, and add the newline back
+        new_line = "\t".join(item1 + item2) + "\n"
+        rearranged_list.append(new_line)
+
+    return rearranged_list
+
+
+def get_librispeech_test_copy(metalst, gen_wav_dir, gpus, librispeech_test_clean_path, eval_ground_truth=False):
+    f = open(metalst)
+    lines = f.readlines()
+    f.close()
+
+    ### For Debugging
+    # lines = shuffle_utterances(lines)
+
+    test_set_ = []
+    for line in tqdm(lines):
+        ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = line.strip().split("\t")
+        gen_spk_id, gen_chaptr_id, _ = gen_utt.split("-")
+
+        if eval_ground_truth:
+            gen_wav = os.path.join(librispeech_test_clean_path, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")
+        else:
+            if os.path.exists(os.path.join(gen_wav_dir, gen_utt + ".flac")):
+                gen_wav = os.path.join(gen_wav_dir, gen_utt + ".flac")
+            elif os.path.exists(os.path.join(gen_wav_dir, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")):
+                gen_wav = os.path.join(gen_wav_dir, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")
+            else:
+                print(f"Generated flac not found: {gen_utt}, skipping...")
+                continue
+
+        ref_spk_id, ref_chaptr_id, _ = ref_utt.split("-")
+        ref_wav = os.path.join(librispeech_test_clean_path, ref_spk_id, ref_chaptr_id, ref_utt + ".flac")
+
+        test_set_.append((gen_wav, ref_wav, gen_txt))
+
+    num_jobs = len(gpus)
+    print("Sanity check")
+    print(test_set_[0])
+    if num_jobs == 1:
+        return [(gpus[0], test_set_)]
+
+    wav_per_job = len(test_set_) // num_jobs + 1
+    test_set = []
+    for i in range(num_jobs):
+        test_set.append((gpus[i], test_set_[i * wav_per_job : (i + 1) * wav_per_job]))
+
+    return test_set
+
+
 def get_libritts_test(gen_wav_dir, gpus, processed_libritts_path, eval_ground_truth=False):
     lines = get_processed_libritts_metainfo(processed_libritts_path, eval=True)
-    print(lines[0])
 
     test_set_ = []
     for line in tqdm(lines):
         ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = line
+        gen_spk_id, gen_chaptr_id, _, _ = gen_utt.split("_")
 
         if eval_ground_truth:
-            gen_spk_id, gen_chaptr_id, _, _ = gen_utt.split("_")
             gen_wav = os.path.join(processed_libritts_path, gen_spk_id, gen_utt + ".wav")
         else:
-            if not os.path.exists(os.path.join(gen_wav_dir, gen_utt + ".wav")):
+            if os.path.exists(os.path.join(gen_wav_dir, gen_utt + ".wav")):
+                gen_wav = os.path.join(gen_wav_dir, gen_utt + ".wav")
+            elif os.path.exists(os.path.join(gen_wav_dir, gen_spk_id, gen_utt + ".wav")):
+                gen_wav = os.path.join(gen_wav_dir, gen_spk_id, gen_utt + ".wav")
+            else:
                 print(f"Generated wav not found: {gen_utt}, skipping...")
                 continue
-            gen_wav = os.path.join(gen_wav_dir, gen_utt + ".wav")
 
         ref_spk_id, ref_chaptr_id, _, _ = ref_utt.split("_")
         ref_wav = os.path.join(processed_libritts_path, ref_spk_id, ref_utt + ".wav")
@@ -362,6 +448,8 @@ def get_libritts_test(gen_wav_dir, gpus, processed_libritts_path, eval_ground_tr
         test_set_.append((gen_wav, ref_wav, gen_txt))
 
     num_jobs = len(gpus)
+    print("Sanity check")
+    print(test_set_[0])
     if num_jobs == 1:
         return [(gpus[0], test_set_)]
 
@@ -508,6 +596,86 @@ def run_sim(args):
         with torch.no_grad():
             emb1 = model(wav1)
             emb2 = model(wav2)
+
+        sim = F.cosine_similarity(emb1, emb2)[0].item()
+        # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")
+        sim_results.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "sim": sim,
+            }
+        )
+
+    return sim_results
+
+
+def run_sim_v2(args):
+    rank, test_set, ckpt_dir, model_type = args
+    device = f"cuda:{rank}"
+
+    if model_type == "wavlm_large_finetune":
+        model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type="wavlm_large", config_path=None)
+        state_dict = torch.load(ckpt_dir, weights_only=True, map_location=lambda storage, loc: storage)
+        model.load_state_dict(state_dict["model"], strict=False)
+
+    elif model_type == "wavlm_base_plus_sv" or model_type == "wavlm_large":
+        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(ckpt_dir)
+        model = WavLMForXVector.from_pretrained(ckpt_dir)
+
+    elif model_type == "speechbrain_ecapa":
+        model = EncoderClassifier.from_hparams(source=ckpt_dir)
+
+    use_gpu = True if torch.cuda.is_available() else False
+    if use_gpu:
+        model = model.cuda(device)
+    model.eval()
+
+    sim_results = []
+    for gen_wav, prompt_wav, truth in tqdm(test_set):
+        wav1, sr1 = torchaudio.load(gen_wav)
+        wav2, sr2 = torchaudio.load(prompt_wav)
+
+        if use_gpu:
+            wav1 = wav1.cuda(device)
+            wav2 = wav2.cuda(device)
+
+        if sr1 != 16000:
+            resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
+            if use_gpu:
+                resample1 = resample1.cuda(device)
+            wav1 = resample1(wav1)
+            sr1 = 16000
+        if sr2 != 16000:
+            resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
+            if use_gpu:
+                resample2 = resample2.cuda(device)
+            wav2 = resample2(wav2)
+            sr2 = 16000
+
+        with torch.no_grad():
+            if model_type == "wavlm_large_finetune":
+                emb1 = model(wav1)
+                emb2 = model(wav2)
+            elif model_type == "wavlm_base_plus_sv" or model_type == "wavlm_large":
+                wav1_for_fe = wav1.detach().mean(dim=0).cpu().numpy()
+                wav2_for_fe = wav2.detach().mean(dim=0).cpu().numpy()
+                inputs = feature_extractor(
+                    [wav1_for_fe, wav2_for_fe], padding=True, return_tensors="pt", sampling_rate=sr1
+                )
+                if use_gpu:
+                    inputs = {k: v.cuda(device) for k, v in inputs.items()}
+                embeddings = model(**inputs).embeddings
+                embeddings = torch.nn.functional.normalize(embeddings, dim=-1).cpu()
+                emb1, emb2 = embeddings[0], embeddings[1]
+                emb1, emb2 = emb1.unsqueeze(0), emb2.unsqueeze(0)
+            elif model_type == "speechbrain_ecapa":
+                wav1_sb = wav1.mean(dim=0)
+                wav2_sb = wav2.mean(dim=0)
+                wavs = torch.nn.utils.rnn.pad_sequence([wav1_sb, wav2_sb], batch_first=True)
+                lengths = torch.tensor([wav1_sb.shape[0], wav2_sb.shape[0]], device=wavs.device, dtype=torch.float32)
+                wav_lens = lengths / lengths.max().clamp(min=1.0)
+                embeddings = model.encode_batch(wavs, wav_lens)
+                emb1, emb2 = embeddings[0], embeddings[1]
 
         sim = F.cosine_similarity(emb1, emb2)[0].item()
         # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")

@@ -44,6 +44,7 @@ dependencies = [
     "vocos",
     "wandb",
     "x_transformers>=1.31.14",
+    "speechbrain",
 ]
 
 [project.optional-dependencies]

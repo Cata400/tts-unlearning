@@ -3,20 +3,20 @@
 import argparse
 import ast
 import json
-import multiprocessing as mp
 import os
 import random
 import sys
-import warnings
+
+import torch
+
+sys.path.append(os.getcwd())
+
+import multiprocessing as mp
 from importlib.resources import files
 
 import numpy as np
-import torch
 
-from f5_tts.eval.utils_eval import get_libritts_test, run_asr_wer, run_sim_v2
-
-sys.path.append(os.getcwd())
-warnings.filterwarnings("ignore")
+from f5_tts.eval.utils_eval import get_librispeech_test_copy, run_asr_wer, run_sim_v2
 
 rel_path = str(files("f5_tts").joinpath("../../"))
 
@@ -27,7 +27,7 @@ def get_args():
     parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer"])
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
-    parser.add_argument("-p", "--processed_libritts_path", type=str, required=True)
+    parser.add_argument("-p", "--librispeech_test_clean_path", type=str, required=True)
     parser.add_argument(
         "-n", "--gpu_nums", type=str, default="1", help="Number of GPUs to use (e.g., 8) or GPU list (e.g., [0,1,2,3])"
     )
@@ -54,21 +54,6 @@ def parse_gpu_nums(gpu_nums_str):
         )
 
 
-def get_speaker_avg_results(full_results, metric_key):
-    speaker_scores = {}
-    for result in full_results:
-        wav_name = result["wav"]
-        speaker = wav_name.split("_", 1)[0]
-        speaker_scores.setdefault(speaker, []).append(result[metric_key])
-
-    speaker_avg_results = []
-    for speaker, scores in speaker_scores.items():
-        speaker_avg_results.append({"wav": speaker, metric_key: round(float(np.mean(scores)), 5)})
-
-    speaker_avg_results.sort(key=lambda x: int(x["wav"].split("_", 1)[0]))
-    return speaker_avg_results
-
-
 def main():
     args = get_args()
     seed = args.seed
@@ -78,12 +63,13 @@ def main():
 
     eval_task = args.eval_task
     lang = args.lang
-    processed_libritts_path = args.processed_libritts_path  # test-clean path
+    librispeech_test_clean_path = args.librispeech_test_clean_path  # test-clean path
     gen_wav_dir = args.gen_wav_dir
+    metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
     sim_model_type = args.sim_model_type
 
     gpus = parse_gpu_nums(args.gpu_nums)
-    test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
+    test_set = get_librispeech_test_copy(metalst, gen_wav_dir, gpus, librispeech_test_clean_path)
 
     ## In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
     ## leading to a low similarity for the ground truth in some cases.
@@ -106,6 +92,7 @@ def main():
             wavlm_ckpt_dir = "microsoft/wavlm-large"
         else:
             raise ValueError(f"Similarity model ty[e {sim_model_type} is not available")
+
     # --------------------------------------------------------------------------
 
     full_results = []
@@ -129,6 +116,13 @@ def main():
         else:
             raise ValueError(f"Unknown metric type: {eval_task}")
 
+        result_path = f"{gen_wav_dir}/_{eval_task}_results.jsonl"
+        with open(result_path, "w") as f:
+            for line in full_results:
+                metrics.append(line[eval_task])
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+            metric = round(np.mean(metrics), 5)
+            f.write(f"\n{eval_task.upper()}: {metric}\n")
     else:
         if eval_task == "wer":
             full_results = run_asr_wer((test_set[0][0], lang, test_set[0][1], asr_ckpt_dir))
@@ -138,15 +132,13 @@ def main():
         else:
             raise ValueError(f"Unknown metric type: {eval_task}")
 
-    speaker_avg_results = get_speaker_avg_results(full_results, eval_task)
-    for line in full_results:
-        metrics.append(line[eval_task])
-    metric = round(np.mean(metrics), 5)
-    all_results = {"avg_results": metric, "speaker_avg_results": speaker_avg_results, "all_results": full_results}
-
-    result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task == 'sim' else ''}.json"
-    with open(result_path, "w") as f:
-        json.dump(all_results, f, indent=4)
+        result_path = f"{gen_wav_dir}/_{eval_task}_results.jsonl"
+        with open(result_path, "w") as f:
+            for line in full_results:
+                metrics.append(line[eval_task])
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+            metric = round(np.mean(metrics), 5)
+            f.write(f"\n{eval_task.upper()}: {metric}\n")
 
     print(f"\nTotal {len(metrics)} samples")
     print(f"{eval_task.upper()}: {metric}")

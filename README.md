@@ -43,7 +43,7 @@ conda install ffmpeg
 > ```bash
 > # Install pytorch with your CUDA version, e.g.
 > pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-> 
+>
 > # And also possible previous versions, e.g.
 > pip install torch==2.4.0+cu124 torchaudio==2.4.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
 > # etc.
@@ -68,7 +68,7 @@ conda install ffmpeg
 > # Install pytorch with your XPU version, e.g.
 > # Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit must be installed
 > pip install torch torchaudio --index-url https://download.pytorch.org/whl/test/xpu
-> 
+>
 > # Intel GPU support is also available through IPEX (Intel® Extension for PyTorch)
 > # IPEX does not require the Intel® Deep Learning Essentials or Intel® oneAPI Base Toolkit
 > # See: https://pytorch-extension.intel.com/installation?request=platform
@@ -89,13 +89,13 @@ conda install ffmpeg
 ### Then you can choose one from below:
 
 > ### 1. As a pip package (if just for inference)
-> 
+>
 > ```bash
 > pip install f5-tts
 > ```
-> 
+>
 > ### 2. Local editable (if also do training, finetuning)
-> 
+>
 > ```bash
 > git clone https://github.com/SWivid/F5-TTS.git
 > cd F5-TTS
@@ -231,13 +231,43 @@ pip install pre-commit
 pre-commit install
 ```
 
-When making a pull request, before each commit, run: 
+When making a pull request, before each commit, run:
 
 ```bash
 pre-commit run --all-files
 ```
 
 Note: Some model components have linting exceptions for E722 to accommodate tensor notation.
+
+
+## Training on remote server
+In order to train a diffusion model on the remote server, using Slurm, we can execute the following command from the project root:
+```bash
+sbatch remote/script_unlearn.sh <config_file> <phase>
+```
+where ```<config_file>``` is the path to the configuration file.
+
+For inference:
+```bash
+sbatch remote/script_inference.sh <config_file_name> <checkpoint> <processed_libritts_dataset_path>
+```
+where ```<config_file_name>``` is the name of the configuration file, ```<checkpoint>``` is the model checkpoint and ```<processed_libritts_dataset_path>``` is the path to the dataset.
+
+For evaluation:
+```bash
+sbatch remote/script_eval.sh <gen_wav_dir> <processed_libritts_dataset_path>
+```
+where ```<gen_wav_dir>``` is path to the directory of generated audios and ```<processed_libritts_dataset_path>``` is the path to the ground truth dataset.
+
+
+Other useful commands:
+- ```srun -p supermicro --pty bash``` to access the server-gpu partition, where we can load modules (```exit``` to exit)
+- ```module avail``` to check available modules
+- ```module load anaconda/3``` to load the anaconda module in order to create virtual environments and install dependencies
+- ```srun --jobid=<job_id> nvidia-smi``` to check the GPU usage of a specific job
+- ```squeue -u <username>``` to check the status of the jobs of a specific user. The ```-u``` flag is optional, if not specified, it will show all jobs.
+- ```scancel <job_id>``` to cancel a specific job
+- ```sinfo``` to check the status of the partitions
 
 
 ## Acknowledgements
@@ -258,7 +288,7 @@ Note: Some model components have linting exceptions for E722 to accommodate tens
 If our work and codebase is useful for you, please cite as:
 ```
 @article{chen-etal-2024-f5tts,
-      title={F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching}, 
+      title={F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching},
       author={Yushen Chen and Zhikang Niu and Ziyang Ma and Keqi Deng and Chunhui Wang and Jian Zhao and Kai Yu and Xie Chen},
       journal={arXiv preprint arXiv:2410.06885},
       year={2024},

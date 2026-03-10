@@ -12,6 +12,7 @@ from importlib.resources import files
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from f5_tts.eval.utils_eval import get_libritts_test, run_asr_wer, run_sim_v2
 
@@ -38,6 +39,7 @@ def get_args():
         default="speechbrain_ecapa",
         choices=["wavlm_large_finetune", "wavlm_base_plus_sv", "speechbrain_ecapa"],
     )
+    parser.add_argument("--config_name", type=str, default="F5TTS_v1_Base_unlearn")
     return parser.parse_args()
 
 
@@ -63,10 +65,27 @@ def get_speaker_avg_results(full_results, metric_key):
 
     speaker_avg_results = []
     for speaker, scores in speaker_scores.items():
-        speaker_avg_results.append({"wav": speaker, metric_key: round(float(np.mean(scores)), 5)})
+        speaker_avg_results.append({"speaker": speaker, metric_key: round(float(np.mean(scores)), 5)})
 
-    speaker_avg_results.sort(key=lambda x: int(x["wav"].split("_", 1)[0]))
+    speaker_avg_results.sort(key=lambda x: int(x["speaker"].split("_", 1)[0]))
     return speaker_avg_results
+
+
+def get_retain_forget_avg_results(speaker_avg_results, metric_key, forget_speakers):
+    retain_results, forget_results = [], []
+    for speaker_results in speaker_avg_results:
+        if int(speaker_results["speaker"]) in forget_speakers:
+            forget_results.append(speaker_results[metric_key])
+        else:
+            retain_results.append(speaker_results[metric_key])
+
+    forget_results = torch.tensor(forget_results)
+    retain_results = torch.tensor(retain_results)
+
+    forget_avg = round(forget_results.mean().item(), 5)
+    retain_avg = round(retain_results.mean().item(), 5)
+
+    return {"retain_avg": retain_avg, "forget_avg": forget_avg}
 
 
 def main():
@@ -81,13 +100,12 @@ def main():
     processed_libritts_path = args.processed_libritts_path  # test-clean path
     gen_wav_dir = args.gen_wav_dir
     sim_model_type = args.sim_model_type
+    config_name = args.config_name
+    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/{config_name}.yaml")))
+    forget_speakers = model_cfg.unlearn.forget_speakers
 
     gpus = parse_gpu_nums(args.gpu_nums)
     test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
-
-    ## In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
-    ## leading to a low similarity for the ground truth in some cases.
-    # test_set = get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path, eval_ground_truth = True)  # eval ground truth
 
     local = args.local
     if local:  # use local custom checkpoint dir
@@ -139,10 +157,16 @@ def main():
             raise ValueError(f"Unknown metric type: {eval_task}")
 
     speaker_avg_results = get_speaker_avg_results(full_results, eval_task)
+    unlearning_avg_results = get_retain_forget_avg_results(speaker_avg_results, eval_task, forget_speakers)
     for line in full_results:
         metrics.append(line[eval_task])
     metric = round(np.mean(metrics), 5)
-    all_results = {"avg_results": metric, "speaker_avg_results": speaker_avg_results, "all_results": full_results}
+    all_results = {
+        "avg_results": metric,
+        "unlearning_avg_results": unlearning_avg_results,
+        "speaker_avg_results": speaker_avg_results,
+        "all_results": full_results,
+    }
 
     result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task == 'sim' else ''}.json"
     with open(result_path, "w") as f:

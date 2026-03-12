@@ -286,21 +286,21 @@ def get_dataset_num_speakers(dataset):
 class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
     """Batch sampler with a fixed 50/50 retain/forget composition per batch.
 
-    Retain samples are iterated once per epoch (shuffled). Forget samples are
-    sampled with replacement, so they can appear multiple times per epoch.
+    Retain samples are iterated once per epoch (shuffled).
+    If oversample_forget is True, forget samples are sampled with replacement, so they can appear multiple times per epoch.
+    If oversample_forget is False, when forget samples are exhausted after one pass through, remaining batches will contain only retain samples.
     """
 
-    def __init__(self, dataset: Dataset, batch_size: int, random_seed: int | None = None):
+    def __init__(
+        self, dataset: Dataset, batch_size: int, random_seed: int | None = None, oversample_forget: bool = False
+    ):
         if batch_size % 2 != 0:
-            raise ValueError(
-                f"balanced_unlearn_sample requires an even batch_size_per_gpu, but received {batch_size}"
-            )
+            raise ValueError(f"balanced_unlearn_sample requires an even batch_size_per_gpu, but received {batch_size}")
         if not hasattr(dataset, "data") or not hasattr(dataset, "forget_speakers"):
-            raise ValueError(
-                "balanced_unlearn_sample requires a dataset with `data` and `forget_speakers` attributes."
-            )
+            raise ValueError("balanced_unlearn_sample requires a dataset with `data` and `forget_speakers` attributes.")
 
         forget_speakers = set(dataset.forget_speakers)
+        self.oversample_forget = oversample_forget
         self.forget_indices = []
         self.retain_indices = []
         for idx in range(len(dataset.data)):
@@ -322,62 +322,90 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
     def set_epoch(self, epoch: int):
         self.epoch = epoch
 
-    # def __iter__(self):
-    #     generator = torch.Generator()
-    #     if self.random_seed is not None:
-    #         generator.manual_seed(self.random_seed + self.epoch)
-    #         retain_perm = torch.randperm(len(self.retain_indices), generator=generator).tolist()
-    #     else:
-    #         retain_perm = torch.randperm(len(self.retain_indices)).tolist()
-    #     shuffled_retain = [self.retain_indices[i] for i in retain_perm]
-
-    #     num_batches = len(self)
-    #     for batch_idx in range(num_batches):
-    #         start = batch_idx * self.half_batch_size
-    #         retain_batch = shuffled_retain[start : start + self.half_batch_size]
-
-    #         if self.random_seed is not None:
-    #             forget_positions = torch.randint(
-    #                 low=0,
-    #                 high=len(self.forget_indices),
-    #                 size=(self.half_batch_size,),
-    #                 generator=generator,
-    #             ).tolist()
-    #         else:
-    #             forget_positions = torch.randint(
-    #                 low=0,
-    #                 high=len(self.forget_indices),
-    #                 size=(self.half_batch_size,),
-    #             ).tolist()
-    #         forget_batch = [self.forget_indices[i] for i in forget_positions]
-
-    #         batch = retain_batch + forget_batch
-    #         if self.random_seed is not None:
-    #             batch_perm = torch.randperm(len(batch), generator=generator).tolist()
-    #         else:
-    #             batch_perm = torch.randperm(len(batch)).tolist()
-    #         yield [batch[i] for i in batch_perm]
-    
     def __iter__(self):
-        generator = torch.Generator()
-        if self.random_seed is not None:
-            generator.manual_seed(self.random_seed + self.epoch)
-            retain_perm = torch.randperm(len(self.retain_indices), generator=generator).tolist()
-            forget_perm = torch.randperm(len(self.forget_indices), generator=generator).tolist()
+        if self.oversample_forget:
+            generator = torch.Generator()
+            if self.random_seed is not None:
+                generator.manual_seed(self.random_seed + self.epoch)
+                retain_perm = torch.randperm(len(self.retain_indices), generator=generator).tolist()
+            else:
+                retain_perm = torch.randperm(len(self.retain_indices)).tolist()
+            shuffled_retain = [self.retain_indices[i] for i in retain_perm]
+
+            num_batches = len(self)
+            for batch_idx in range(num_batches):
+                start = batch_idx * self.half_batch_size
+                retain_batch = shuffled_retain[start : start + self.half_batch_size]
+
+                if self.random_seed is not None:
+                    forget_positions = torch.randint(
+                        low=0,
+                        high=len(self.forget_indices),
+                        size=(self.half_batch_size,),
+                        generator=generator,
+                    ).tolist()
+                else:
+                    forget_positions = torch.randint(
+                        low=0,
+                        high=len(self.forget_indices),
+                        size=(self.half_batch_size,),
+                    ).tolist()
+                forget_batch = [self.forget_indices[i] for i in forget_positions]
+
+                batch = retain_batch + forget_batch
+                if self.random_seed is not None:
+                    batch_perm = torch.randperm(len(batch), generator=generator).tolist()
+                else:
+                    batch_perm = torch.randperm(len(batch)).tolist()
+                yield [batch[i] for i in batch_perm]
         else:
-            retain_perm = torch.randperm(len(self.retain_indices)).tolist()
-            forget_perm = torch.randperm(len(self.forget_indices)).tolist()
-            
-        retain_perm = retain_perm[:len(forget_perm)]
-        batches = []
-        for i in range(len(forget_perm)):
-            batches.append([self.retain_indices[retain_perm[i]], self.forget_indices[forget_perm[i]]])
-        return iter(batches)
+            generator = torch.Generator()
+            if self.random_seed is not None:
+                generator.manual_seed(self.random_seed + self.epoch)
+                retain_perm = torch.randperm(len(self.retain_indices), generator=generator).tolist()
+                forget_perm = torch.randperm(len(self.forget_indices), generator=generator).tolist()
+            else:
+                retain_perm = torch.randperm(len(self.retain_indices)).tolist()
+                forget_perm = torch.randperm(len(self.forget_indices)).tolist()
+
+            shuffled_retain = [self.retain_indices[i] for i in retain_perm]
+            shuffled_forget = [self.forget_indices[i] for i in forget_perm]
+            # shuffled_retain = shuffled_retain[:len(shuffled_forget)]
+
+            num_forget_batches = (len(self.forget_indices) + self.half_batch_size - 1) // self.half_batch_size
+            num_retain_batches = (len(self.retain_indices) + self.half_batch_size - 1) // self.half_batch_size
+            for batch_idx in range(num_forget_batches):
+                start = batch_idx * self.half_batch_size
+                forget_batch = shuffled_forget[start : start + self.half_batch_size]
+                retain_batch = shuffled_retain[start : start + self.half_batch_size]
+
+                batch = retain_batch + forget_batch
+                if self.random_seed is not None:
+                    batch_perm = torch.randperm(len(batch), generator=generator).tolist()
+                else:
+                    batch_perm = torch.randperm(len(batch)).tolist()
+                yield [batch[i] for i in batch_perm]
+
+            # After all forget samples are used, yield remaining retain samples in batches
+            for batch_idx in range(num_forget_batches, num_retain_batches):
+                start = batch_idx * self.half_batch_size
+                retain_batch = shuffled_retain[start : start + self.half_batch_size]
+
+                if len(retain_batch) == 0:
+                    continue
+
+                if self.random_seed is not None:
+                    batch_perm = torch.randperm(len(retain_batch), generator=generator).tolist()
+                else:
+                    batch_perm = torch.randperm(len(retain_batch)).tolist()
+                yield [retain_batch[i] for i in batch_perm]
 
     def __len__(self):
         # Keep strict 50/50 composition by only emitting full half-batches.
-        # return len(self.retain_indices) // self.half_batch_size
-        return len(self.forget_indices)
+        if self.oversample_forget:
+            return len(self.retain_indices) // self.half_batch_size
+        else:
+            return (len(self.retain_indices) + self.half_batch_size - 1) // self.half_batch_size
 
 
 # Dynamic Batch Sampler

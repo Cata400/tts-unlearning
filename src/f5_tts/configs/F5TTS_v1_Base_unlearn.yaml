@@ -59,6 +59,10 @@ unlearn:
   random_seed: 42
   forget_speakers: [196] # [103]
   unlearn_methods:
-    dont_mimic_my_voice:
+    TGU:
       use: true
       lambda: 0.2 # retain weight, 1 - lambda is forget weight
+    SGU:
+      use: false
+      forget_ratio: 0.2 # probability of optimizing for forget
+      balanced_unlearn_sample_oversample_forget: false # whether to oversample forget samples for balanced_unlearn_sample batch type

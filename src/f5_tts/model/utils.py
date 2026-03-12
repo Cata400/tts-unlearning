@@ -12,7 +12,6 @@ import torch
 from pypinyin import Style, lazy_pinyin
 from torch.nn.utils.rnn import pad_sequence
 
-
 # seed everything
 
 
@@ -64,6 +63,17 @@ def mask_from_start_end_indices(seq_len: int["b"], start: int["b"], end: int["b"
     start_mask = seq[None, :] >= start[:, None]
     end_mask = seq[None, :] < end[:, None]
     return start_mask & end_mask
+
+
+def mask_retain_full(lens: torch.Tensor, retain_lens: torch.Tensor) -> torch.Tensor:
+    batch = lens.shape[0]
+    if retain_lens.shape[0] != batch:
+        raise ValueError("retain_lens must have the same batch size as lens")
+
+    # retain segment starts at lens - retain_lens and spans full retain length
+    start = lens - retain_lens
+    end = lens
+    return mask_from_start_end_indices(lens, start, end)
 
 
 def mask_from_frac_lengths(seq_len: int["b"], frac_lengths: float["b"]):
@@ -152,9 +162,7 @@ def convert_char_to_pinyin(text_list, polyphone=True):
     )  # add custom trans here, to address oov
 
     def is_chinese(c):
-        return (
-            "\u3100" <= c <= "\u9fff"  # common chinese characters
-        )
+        return "\u3100" <= c <= "\u9fff"  # common chinese characters
 
     for text in text_list:
         char_list = []

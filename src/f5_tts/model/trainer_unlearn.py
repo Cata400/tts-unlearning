@@ -19,11 +19,16 @@ from torch.utils.data import (
 )
 from tqdm import tqdm
 
+from f5_tts.infer.utils_infer import (
+    cfg_strength,
+    nfe_step,
+    sway_sampling_coef,
+)
 from f5_tts.model import CFM
 from f5_tts.model.dataset import (
+    BalancedUnlearningSampleBatchSampler,
     DynamicBatchSampler,
     DynamicUnlearningBatchSampler,
-    BalancedUnlearningSampleBatchSampler,
     build_unlearning_sample_weights,
     collate_fn_unlearning,
     get_dataset_num_speakers,
@@ -341,21 +346,7 @@ class TrainerUnlearn:  # TODO add info logger
         gc.collect()
         return update
 
-    def train(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
-        if self.log_samples:
-            from f5_tts.infer.utils_infer import (
-                cfg_strength,
-                nfe_step,
-                sway_sampling_coef,
-            )
-
-            # vocoder = load_vocoder(
-            #     vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
-            # )
-            self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
-            log_samples_path = f"{self.checkpoint_path}/samples"
-            os.makedirs(log_samples_path, exist_ok=True)
-
+    def create_dataloader(self, train_dataset, num_workers=16, resumable_with_seed: int = None):
         if exists(resumable_with_seed):
             generator = torch.Generator()
             generator.manual_seed(resumable_with_seed)
@@ -403,6 +394,7 @@ class TrainerUnlearn:  # TODO add info logger
                 train_dataset,
                 batch_size=self.batch_size_per_gpu,
                 random_seed=resumable_with_seed,
+                oversample_forget=self.unlearn_params.get("balanced_unlearn_sample_oversample_forget", False),
             )
             train_dataloader = DataLoader(
                 train_dataset,
@@ -456,6 +448,19 @@ class TrainerUnlearn:  # TODO add info logger
                 "'sample', 'unlearn_sample', 'balanced_unlearn_sample', 'frame', or 'unlearn_frame', "
                 f"but received {self.batch_size_type}"
             )
+
+        return train_dataloader
+
+    def train_TGU(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
+        if self.log_samples:
+            # vocoder = load_vocoder(
+            #     vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
+            # )
+            self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
+            log_samples_path = f"{self.checkpoint_path}/samples"
+            os.makedirs(log_samples_path, exist_ok=True)
+
+        train_dataloader = self.create_dataloader(train_dataset, num_workers, resumable_with_seed)
 
         #  accelerator.prepare() dispatches batches to devices;
         #  which means the length of dataloader calculated before, should consider the number of devices
@@ -619,6 +624,182 @@ class TrainerUnlearn:  # TODO add info logger
                         #         text=infer_text,
                         #         duration=ref_audio_len * 2,
                         #         steps=nfe_step,
+                        #         cfg_strength=cfg_strength,
+                        #         sway_sampling_coef=sway_sampling_coef,
+                        #     )
+                        #     generated = generated.to(torch.float32)
+                        #     gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                        #     ref_mel_spec = batch["mel"][0].unsqueeze(0)
+                        #     if self.vocoder_name == "vocos":
+                        #         gen_audio = vocoder.decode(gen_mel_spec).cpu()
+                        #         ref_audio = vocoder.decode(ref_mel_spec).cpu()
+                        #     elif self.vocoder_name == "bigvgan":
+                        #         gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
+                        #         ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
+
+                        # torchaudio.save(
+                        #     f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
+                        # )
+                        # torchaudio.save(
+                        #     f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
+                        # )
+                        # self.model.train()
+
+        self.save_checkpoint(global_update, last=True)
+
+        self.accelerator.end_training()
+
+    def train_SGU(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
+        if self.log_samples:
+            # vocoder = load_vocoder(
+            #     vocoder_name=self.vocoder_name, is_local=self.is_local_vocoder, local_path=self.local_vocoder_path
+            # )
+            self.accelerator.unwrap_model(self.model).mel_spec.target_sample_rate
+            log_samples_path = f"{self.checkpoint_path}/samples"
+            os.makedirs(log_samples_path, exist_ok=True)
+
+        assert (
+            self.batch_size_type == "balanced_unlearn_sample"
+        ), "Batches should be balance, this method requires an equal number of forget and retain samples per batch. Use batch_size_type == 'balanced_unlearn_sample'"
+        assert self.batch_size_per_gpu % 2 == 0
+        train_dataloader = self.create_dataloader(train_dataset, num_workers, resumable_with_seed)
+
+        #  accelerator.prepare() dispatches batches to devices;
+        #  which means the length of dataloader calculated before, should consider the number of devices
+        warmup_updates = (
+            self.num_warmup_updates * self.accelerator.num_processes
+        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
+        # otherwise by default with split_batches=False, warmup steps change with num_processes
+        total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
+        decay_updates = total_updates - warmup_updates
+        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
+        decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
+        self.scheduler = SequentialLR(
+            self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
+        )
+        train_dataloader, self.scheduler = self.accelerator.prepare(
+            train_dataloader, self.scheduler
+        )  # actual multi_gpu updates = single_gpu updates / gpu nums
+        self.load_pretrained_checkpoint(self.teacher)
+        self.load_pretrained_checkpoint(self.model)
+        print(self.checkpoint_path, os.listdir(self.checkpoint_path))
+        start_update = self.load_checkpoint()
+        global_update = start_update
+
+        # set teacher to eval and no grad
+        self.accelerator.unwrap_model(self.teacher).eval()
+        for param in self.accelerator.unwrap_model(self.teacher).parameters():
+            param.requires_grad = False
+
+        if exists(resumable_with_seed):
+            orig_epoch_step = len(train_dataloader)
+            start_step = start_update * self.grad_accumulation_steps
+            skipped_epoch = int(start_step // orig_epoch_step)
+            skipped_batch = start_step % orig_epoch_step
+            skipped_dataloader = self.accelerator.skip_first_batches(train_dataloader, num_batches=skipped_batch)
+        else:
+            skipped_epoch = 0
+
+        for epoch in range(skipped_epoch, self.epochs):
+            self.model.train()
+            if exists(resumable_with_seed) and epoch == skipped_epoch:
+                progress_bar_initial = math.ceil(skipped_batch / self.grad_accumulation_steps)
+                current_dataloader = skipped_dataloader
+            else:
+                progress_bar_initial = 0
+                current_dataloader = train_dataloader
+
+            # Set epoch for the batch sampler if it exists
+            if hasattr(train_dataloader, "batch_sampler") and hasattr(train_dataloader.batch_sampler, "set_epoch"):
+                train_dataloader.batch_sampler.set_epoch(epoch)
+
+            progress_bar = tqdm(
+                range(math.ceil(len(train_dataloader) / self.grad_accumulation_steps)),
+                desc=f"Epoch {epoch + 1}/{self.epochs}",
+                unit="update",
+                disable=not self.accelerator.is_local_main_process,
+                initial=progress_bar_initial,
+            )
+
+            for batch in current_dataloader:
+                with self.accelerator.accumulate(self.model):
+                    text_inputs_retain = batch["text_retain"]
+                    text_inputs_forget = batch["text_forget"]
+
+                    mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
+                    mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
+
+                    mel_lengths_retain = batch["mel_lengths_retain"]
+                    mel_lengths_forget = batch["mel_lengths_forget"]
+
+                    do_forget = torch.rand((1,)).item() < self.unlearn_params["forget_ratio"]
+                    if do_forget and mel_spec_forget.numel() > 0:  # if there is at least one forget sample
+                        mel_spec_concat = torch.cat([mel_spec_forget, mel_spec_retain], dim=1)
+                        text_inputs_concat = [
+                            text_inputs_forget[i] + " " + text_inputs_retain[i] for i in range(len(text_inputs_retain))
+                        ]
+                        mel_lengths_concat = mel_lengths_forget + mel_lengths_retain
+
+                        loss, cond, pred = self.model.forward_unlearn_SGU(
+                            mel_spec_concat,
+                            text=text_inputs_concat,
+                            lens=mel_lengths_concat,
+                            retain_lens=mel_lengths_retain,
+                            noise_scheduler=self.noise_scheduler,
+                        )
+                    else:
+                        loss, cond, pred = self.model.forward_unlearn(
+                            mel_spec_retain,
+                            text=text_inputs_retain,
+                            lens=mel_lengths_retain,
+                            noise_scheduler=self.noise_scheduler,
+                            forget=False,
+                        )
+                    self.accelerator.backward(loss)
+
+                    if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+
+                if self.accelerator.sync_gradients:
+                    if self.is_main:
+                        self.ema_model.update()
+
+                    global_update += 1
+                    progress_bar.update(1)
+                    progress_bar.set_postfix(update=str(global_update), loss=loss.item())
+
+                if self.accelerator.is_local_main_process:
+                    self.accelerator.log(
+                        {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}, step=global_update
+                    )
+                    if self.logger == "tensorboard":
+                        self.writer.add_scalar("loss", loss.item(), global_update)
+                        self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
+
+                if global_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
+                    self.save_checkpoint(global_update, last=True)
+
+                if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
+                    self.save_checkpoint(global_update)
+
+                    if self.log_samples and self.accelerator.is_local_main_process:  # TODO change this at some point
+                        pass
+                        # ref_audio_len = mel_lengths_retain[0]
+                        # infer_text = [
+                        #     text_inputs_retain[0]
+                        #     + ([" "] if isinstance(text_inputs_retain[0], list) else " ")
+                        #     + text_inputs_retain[0]
+                        # ]
+                        # with torch.inference_mode():
+                        #     generated, _ = self.accelerator.unwrap_model(self.model).sample(
+                        #         cond=mel_spec_retain[0][:ref_audio_len].unsqueeze(0),
+                        #         text=infer_text,
+                        #         duration=ref_audio_len * 2,
+                        #         steps=nfe_step,continue
                         #         cfg_strength=cfg_strength,
                         #         sway_sampling_coef=sway_sampling_coef,
                         #     )

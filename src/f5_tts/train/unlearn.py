@@ -28,14 +28,15 @@ def main(model_cfg):
     np.random.seed(model_cfg.unlearn.random_seed)
 
     # Check unlearn methods
-    unlearn_params = None
+    unlearn_methods_use = [params.use for _, params in model_cfg.unlearn.unlearn_methods.items()]
+    assert sum(unlearn_methods_use) == 1, "A single unlearning method can be in use at a time"
+
     for method, params in model_cfg.unlearn.unlearn_methods.items():
         if params.use:
             print(f"Using unlearn method {method} with params: {params}")
             unlearn_params = params
+            unlearn_method = method
             break
-    if unlearn_params is None:
-        raise ValueError("No unlearn method specified in the configuration.")
 
     model_cls = hydra.utils.get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
@@ -102,11 +103,19 @@ def main(model_cfg):
         mel_spec_kwargs=model_cfg.model.mel_spec,
         forget_speakers=model_cfg.unlearn.forget_speakers,
     )
-    trainer.train(
-        train_dataset,
-        num_workers=model_cfg.datasets.num_workers,
-        resumable_with_seed=model_cfg.unlearn.random_seed,  # seed for shuffling dataset
-    )
+
+    if unlearn_method == "TGU":
+        trainer.train_TGU(
+            train_dataset,
+            num_workers=model_cfg.datasets.num_workers,
+            resumable_with_seed=model_cfg.unlearn.random_seed,  # seed for shuffling dataset
+        )
+    elif unlearn_method == "SGU":
+        trainer.train_SGU(
+            train_dataset,
+            num_workers=model_cfg.datasets.num_workers,
+            resumable_with_seed=model_cfg.unlearn.random_seed,  # seed for shuffling dataset
+        )
 
 
 if __name__ == "__main__":

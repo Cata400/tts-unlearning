@@ -26,11 +26,20 @@ fi
 
 if [ -z "$3" ]
 then
+    echo "Using default CONFIG_NAME: F5TTS_v1_Base_unlearn"
+    CONFIG_NAME=F5TTS_v1_Base_unlearn
+else
+    echo "CONFIG_NAME: $3"
+    CONFIG_NAME=$3
+fi
+
+if [ -z "$4" ]
+then
     echo "Using default GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL: /home/catalin.ciocirlan/phd/tts-unlearning/results/pretrained_unconditional"
     GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL=/home/catalin.ciocirlan/phd/tts-unlearning/results/pretrained_unconditional
 else
-    echo "GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL: $3"
-    GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL=$3
+    echo "GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL: $4"
+    GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL=$4
 fi
 
 
@@ -40,8 +49,8 @@ module load cuda/12.6-9.5
 conda activate f5-tts
 
 echo "Evaluating SIM"
-python3 ./eval/eval_libritts.py --eval_task sim --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
+python3 ./eval/eval_libritts.py --eval_task sim --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
 echo "Evaluating WER"
-python3 ./eval/eval_libritts.py --eval_task wer --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
+python3 ./eval/eval_libritts.py --eval_task wer --config_name $CONFIG_NAME  --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
 echo "Evaluating spk-ZRF"
-python3 ./eval/eval_libritts.py --eval_task sspk-ZRF --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --gen_wav_dir_pretrained_unconditional $GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL
+python3 ./eval/eval_libritts.py --eval_task sspk-ZRF --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --gen_wav_dir_pretrained_unconditional $GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL

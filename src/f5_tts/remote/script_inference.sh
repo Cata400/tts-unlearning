@@ -15,8 +15,16 @@
 #################################
 
 EXPNAME=$1
-CKPTSTEP=$2
-echo "EXPNAME: $EXPNAME, CKPTSTEP: $CKPTSTEP"
+echo "EXPNAME: $EXPNAME"
+
+if [ -z "$2" ]
+then
+    echo "Using default CKPTSTEP: last"
+    CKPTSTEP=last
+else
+    echo "CKPTSTEP: $2"
+    CKPTSTEP=$2
+fi
 
 if [ -z "$3" ]
 then

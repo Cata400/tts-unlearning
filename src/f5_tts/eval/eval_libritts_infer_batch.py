@@ -158,8 +158,7 @@ def main():
         ckpt_path = ckpt_prefix + ".safetensors"
     else:
         print("Loading from self-organized training checkpoints rather than released pretrained.")
-        # ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/unlearned_model_{ckpt_step}"
-        ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/pretrained_model_1250000"
+        ckpt_prefix = rel_path + f"/{model_cfg.ckpts.save_dir}/unlearned_model_{ckpt_step}"
         if os.path.exists(ckpt_prefix + ".pt"):
             ckpt_path = ckpt_prefix + ".pt"
         elif os.path.exists(ckpt_prefix + ".safetensors"):
@@ -174,7 +173,7 @@ def main():
     if not os.path.exists(output_dir) and accelerator.is_main_process:
         os.makedirs(output_dir)
 
-    # write metainfo to output dir for debugging and reference        
+    # write metainfo to output dir for debugging and reference
     if accelerator.is_main_process:
         with open(f"{output_dir}/metainfo.txt", "w") as f:
             for line in metainfo:
@@ -205,6 +204,17 @@ def main():
                     no_ref_audio=no_ref_audio,
                     seed=seed,
                 )
+                # generated, _ = model.sample(
+                #     cond=torch.zeros_like(ref_mels),
+                #     text=final_text_list,
+                #     duration=total_mel_lens,
+                #     lens=ref_mel_lens,
+                #     steps=nfe_step,
+                #     cfg_strength=cfg_strength,
+                #     sway_sampling_coef=sway_sampling_coef,
+                #     no_ref_audio=no_ref_audio,
+                #     seed=seed,
+                # )
                 # Final result
                 for i, gen in enumerate(generated):
                     gen = gen[ref_mel_lens[i] : total_mel_lens[i], :].unsqueeze(0)

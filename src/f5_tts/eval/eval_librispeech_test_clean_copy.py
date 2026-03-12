@@ -11,12 +11,16 @@ import torch
 
 sys.path.append(os.getcwd())
 
-import multiprocessing as mp
 from importlib.resources import files
 
 import numpy as np
 
-from f5_tts.eval.utils_eval import get_librispeech_test_copy, run_asr_wer, run_sim_v2
+from f5_tts.eval.utils_eval import (
+    get_librispeech_test_copy,
+    run_asr_wer,
+    run_sim_v2,
+    run_spk_ZRF_pipeline_librispeech,
+)
 
 rel_path = str(files("f5_tts").joinpath("../../"))
 
@@ -24,7 +28,7 @@ rel_path = str(files("f5_tts").joinpath("../../"))
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--seed", default=42, type=int)
-    parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer"])
+    parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer", "spk-ZRF"])
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
     parser.add_argument("-p", "--librispeech_test_clean_path", type=str, required=True)
@@ -38,6 +42,16 @@ def get_args():
         default="speechbrain_ecapa",
         choices=["wavlm_large_finetune", "wavlm_base_plus_sv", "speechbrain_ecapa"],
     )
+    # spk-ZRF args
+    parser.add_argument(
+        "--gen_wav_dir_pretrained_unconditional",
+        type=str,
+        default=None,
+        help="Generated wav dir for θ⁻ (text + speaker prompt)",
+    )
+    parser.add_argument("--gen_name_tpl", type=str, default="{id}.wav")
+    parser.add_argument("--skip_missing_gen", action="store_true")
+    parser.add_argument("--batch_size", type=int, default=8)
     return parser.parse_args()
 
 
@@ -52,6 +66,21 @@ def parse_gpu_nums(gpu_nums_str):
         raise argparse.ArgumentTypeError(
             f"Invalid GPU specification: {gpu_nums_str}. Use a number (e.g., 8) or a list (e.g., [0,1,2,3])"
         )
+
+
+def get_speaker_avg_results(full_results, metric_key):
+    speaker_scores = {}
+    for result in full_results:
+        wav_name = result["wav"]
+        speaker = wav_name.split("-", 1)[0]
+        speaker_scores.setdefault(speaker, []).append(result[metric_key])
+
+    speaker_avg_results = []
+    for speaker, scores in speaker_scores.items():
+        speaker_avg_results.append({"speaker": speaker, metric_key: round(float(np.mean(scores)), 5)})
+
+    speaker_avg_results.sort(key=lambda x: int(x["speaker"]))
+    return speaker_avg_results
 
 
 def main():
@@ -69,7 +98,8 @@ def main():
     sim_model_type = args.sim_model_type
 
     gpus = parse_gpu_nums(args.gpu_nums)
-    test_set = get_librispeech_test_copy(metalst, gen_wav_dir, gpus, librispeech_test_clean_path)
+    if eval_task in ["sim", "wer"]:
+        test_set = get_librispeech_test_copy(metalst, gen_wav_dir, gpus, librispeech_test_clean_path)
 
     ## In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
     ## leading to a low similarity for the ground truth in some cases.
@@ -81,7 +111,7 @@ def main():
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
 
-    if eval_task == "sim":
+    if eval_task in ["sim", "spk-ZRF"]:
         if sim_model_type == "wavlm_large_finetune":
             wavlm_ckpt_dir = os.path.join(rel_path, "ckpts", "UniSpeech", "wavlm_large_finetune.pth")
         elif sim_model_type == "wavlm_base_plus_sv":
@@ -98,47 +128,31 @@ def main():
     full_results = []
     metrics = []
 
-    if len(gpus) > 1:
-        ctx = mp.get_context("spawn")
-
-        if eval_task == "wer":
-            with ctx.Pool(processes=len(gpus)) as pool:
-                args = [(rank, lang, sub_test_set, asr_ckpt_dir) for (rank, sub_test_set) in test_set]
-                results = pool.map(run_asr_wer, args)
-                for r in results:
-                    full_results.extend(r)
-        elif eval_task == "sim":
-            with ctx.Pool(processes=len(gpus)) as pool:
-                args = [(rank, sub_test_set, wavlm_ckpt_dir, sim_model_type) for (rank, sub_test_set) in test_set]
-                results = pool.map(run_sim_v2, args)
-                for r in results:
-                    full_results.extend(r)
-        else:
-            raise ValueError(f"Unknown metric type: {eval_task}")
-
-        result_path = f"{gen_wav_dir}/_{eval_task}_results.jsonl"
-        with open(result_path, "w") as f:
-            for line in full_results:
-                metrics.append(line[eval_task])
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
-            metric = round(np.mean(metrics), 5)
-            f.write(f"\n{eval_task.upper()}: {metric}\n")
+    if eval_task == "wer":
+        full_results = run_asr_wer((test_set[0][0], lang, test_set[0][1], asr_ckpt_dir))
+    elif eval_task == "sim":
+        # full_results = run_sim((test_set[0][0], test_set[0][1], wavlm_ckpt_dir))
+        full_results = run_sim_v2((test_set[0][0], test_set[0][1], wavlm_ckpt_dir, sim_model_type))
+    elif eval_task == "spk-ZRF":
+        full_results, _ = run_spk_ZRF_pipeline_librispeech(args, metalst, wavlm_ckpt_dir)
     else:
-        if eval_task == "wer":
-            full_results = run_asr_wer((test_set[0][0], lang, test_set[0][1], asr_ckpt_dir))
-        elif eval_task == "sim":
-            # full_results = run_sim((test_set[0][0], test_set[0][1], wavlm_ckpt_dir))
-            full_results = run_sim_v2((test_set[0][0], test_set[0][1], wavlm_ckpt_dir, sim_model_type))
-        else:
-            raise ValueError(f"Unknown metric type: {eval_task}")
+        raise ValueError(f"Unknown metric type: {eval_task}")
 
-        result_path = f"{gen_wav_dir}/_{eval_task}_results.jsonl"
-        with open(result_path, "w") as f:
-            for line in full_results:
-                metrics.append(line[eval_task])
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
-            metric = round(np.mean(metrics), 5)
-            f.write(f"\n{eval_task.upper()}: {metric}\n")
+    speaker_avg_results = get_speaker_avg_results(full_results, eval_task)
+    for line in full_results:
+        metrics.append(line[eval_task])
+    metric = round(np.mean(metrics), 5)
+    all_results = {
+        "avg_results": metric,
+        "speaker_avg_results": speaker_avg_results,
+        "all_results": full_results,
+    }
+
+    result_path = (
+        f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF'] else ''}.json"
+    )
+    with open(result_path, "w") as f:
+        json.dump(all_results, f, indent=4)
 
     print(f"\nTotal {len(metrics)} samples")
     print(f"{eval_task.upper()}: {metric}")
@@ -146,5 +160,4 @@ def main():
 
 
 if __name__ == "__main__":
-    mp.set_start_method("spawn", force=True)
     main()

@@ -1,6 +1,8 @@
+import glob
 import math
 import os
 import random
+import re
 import string
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from tqdm import tqdm
 from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
 
 from f5_tts.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
+from f5_tts.eval.eval_spk_ZRF import build_testset_spkzrf, run_spkzrf
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import convert_char_to_pinyin
 
@@ -61,13 +64,13 @@ def get_processed_libritts_metainfo(processed_libritts_test_path, eval=False):
     metainfo = []
     recordings = []
 
-    for speaker in os.listdir(processed_libritts_test_path):
+    for speaker in sorted(os.listdir(processed_libritts_test_path)):
         speaker_path = os.path.join(processed_libritts_test_path, speaker)
         if not os.path.isdir(speaker_path):
             continue
 
         speaker_recordings = []
-        for file in os.listdir(speaker_path):
+        for file in sorted(os.listdir(speaker_path)):
             if file.endswith(".wav"):
                 utt = file[:-4]
                 wav_path = os.path.join(speaker_path, file)
@@ -687,3 +690,221 @@ def run_sim_v2(args):
         )
 
     return sim_results
+
+
+######## SPK-ZRF FROM TRUS
+UTT_RE_LIBRITTS = re.compile(r"\b(\d{1,6}_\d{1,6}_\d{1,6}_\d{1,6})\b")
+UTT_RE_LIBRISPEECH = re.compile(r"\b(\d{1,6}-\d{1,6}-\d{1,6})\b")
+
+
+def parse_ref_map_from_lst(metalst):
+    m = {}
+    if isinstance(metalst, str):
+        with open(metalst, "r", encoding="utf-8") as f:
+            for line in f:
+                ref_utt, _, _, gen_utt, _, _ = line.strip().split("\t")
+                m[gen_utt] = ref_utt
+    elif isinstance(metalst, list):
+        for line in metalst:
+            ref_utt, _, _, gen_utt, _, _ = line
+            m[gen_utt] = ref_utt
+    return m
+
+
+def utt_to_ref_flac(root: str, utt_id: str) -> str:
+    spk, chap, _ = utt_id.split("-")
+    if os.path.exists(os.path.join(root, spk, f"{utt_id}.flac")):
+        return os.path.join(root, spk, f"{utt_id}.flac")
+    return os.path.join(root, spk, chap, f"{utt_id}.flac")
+
+
+def utt_to_ref_wav(root: str, utt_id: str) -> str:
+    spk, chap, _, _ = utt_id.split("_")
+    if os.path.exists(os.path.join(root, spk, f"{utt_id}.wav")):
+        return os.path.join(root, spk, f"{utt_id}.wav")
+
+    return os.path.join(root, spk, chap, f"{utt_id}.wav")
+
+
+def collect_utt_ids_from_theta(theta_dir: str) -> set[str]:
+    ids = set()
+    for p in glob.glob(os.path.join(theta_dir, "**", "*.wav"), recursive=True):
+        stem = Path(p).stem
+        if UTT_RE_LIBRITTS.fullmatch(stem):
+            ids.add(stem)
+    return ids
+
+
+def collect_utt_ids_from_theta_librispeech(theta_dir: str) -> set[str]:
+    ids = set()
+    for p in glob.glob(os.path.join(theta_dir, "**", "*.wav"), recursive=True):
+        stem = Path(p).stem
+        if UTT_RE_LIBRISPEECH.fullmatch(stem):
+            ids.add(stem)
+    return ids
+
+
+def collect_utt_ids_from_lst(metalst):
+    ids = set()
+    if isinstance(metalst, str):
+        with open(metalst, "r", encoding="utf-8") as f:
+            for line in f:
+                m = UTT_RE_LIBRISPEECH.search(line)
+                if m:
+                    ids.add(m.group(1))
+    elif isinstance(metalst, list):
+        for line in metalst:
+            line = " ".join(line)
+            m = UTT_RE_LIBRITTS.search(line)
+            if m:
+                ids.add(m.group(1))
+    return ids
+
+
+def run_spk_ZRF_pipeline_libritts(args, ckpt_dir):
+    metalst = get_processed_libritts_metainfo(args.processed_libritts_path, eval=True)
+    if not args.gen_wav_dir:
+        raise ValueError("[spk-ZRF] --gen_wav_dir is required (θ⁻ directory).")
+
+    for d, name in [
+        (args.gen_wav_dir, "gen_wav_dir (tminus)"),
+        (args.gen_wav_dir_pretrained_unconditional, "gen_wav_dir_pretrained_unconditional (theta)"),
+    ]:
+        if not os.path.isdir(d):
+            raise FileNotFoundError(f"[spk-ZRF] {name} not found or not a directory: {d}")
+
+    utt_ids = collect_utt_ids_from_theta(args.gen_wav_dir)
+    if not utt_ids:
+        utt_ids = collect_utt_ids_from_lst(metalst)
+    if not utt_ids:
+        raise RuntimeError("[spk-ZRF] No utt ids found from theta dir or .lst")
+
+    ref_map = parse_ref_map_from_lst(metalst)
+
+    items = []
+    miss = 0
+    for uid in sorted(utt_ids):
+        ref_utt = ref_map.get(uid)
+        if not ref_utt:
+            miss += 1
+            continue
+        ref = utt_to_ref_wav(args.processed_libritts_path, ref_utt)
+        if not os.path.exists(ref):
+            miss += 1
+            continue
+        spk_id = ref_utt.split("_")[0]
+        items.append(
+            {
+                "id": uid,
+                "text": "",
+                "ref_wav": ref,
+                "spk_id": spk_id,
+                "speaker": "",
+                "language": "",
+                "duration": 0.0,
+                "dnsmos": None,
+            }
+        )
+
+    if miss:
+        print(f"[INFO] Missing ref wav for {miss} ids (skipped)")
+
+    if not items:
+        raise RuntimeError("[spk-ZRF] No valid items with existing enrollment flac found.")
+
+    pairs = build_testset_spkzrf(
+        items,
+        gen_root_theta=args.gen_wav_dir_pretrained_unconditional,
+        gen_root_tminus=args.gen_wav_dir,
+        skip_missing_gen=args.skip_missing_gen,
+        gen_name_tpl=args.gen_name_tpl,
+    )
+    print(f"[INFO] Paired {len(pairs)} ids for spk-ZRF")
+
+    device = torch.device("cuda")
+    results, spkzrf_mean = run_spkzrf(
+        pairs,
+        sv_model_name=ckpt_dir,
+        target_sr=16000,
+        batch_size=args.batch_size,
+        device=device,
+        use_amp=True,
+        embed_batch_size=2,
+        max_seconds=8.0,
+    )
+
+    return results, spkzrf_mean
+
+
+def run_spk_ZRF_pipeline_librispeech(args, metalst, ckpt_dir):
+    if not args.gen_wav_dir:
+        raise ValueError("[spk-ZRF] --gen_wav_dir is required (θ⁻ directory).")
+
+    for d, name in [
+        (args.gen_wav_dir, "gen_wav_dir (tminus)"),
+        (args.gen_wav_dir_pretrained_unconditional, "gen_wav_dir_pretrained_unconditional (theta)"),
+    ]:
+        if not os.path.isdir(d):
+            raise FileNotFoundError(f"[spk-ZRF] {name} not found or not a directory: {d}")
+
+    utt_ids = collect_utt_ids_from_theta_librispeech(args.gen_wav_dir)
+    if not utt_ids:
+        utt_ids = collect_utt_ids_from_lst(metalst)
+    if not utt_ids:
+        raise RuntimeError("[spk-ZRF] No utt ids found from theta dir or .lst")
+
+    ref_map = parse_ref_map_from_lst(metalst)
+
+    items = []
+    miss = 0
+    for uid in sorted(utt_ids):
+        ref_utt = ref_map.get(uid)
+        if not ref_utt:
+            miss += 1
+            continue
+        ref = utt_to_ref_flac(args.librispeech_test_clean_path, ref_utt)
+        if not os.path.exists(ref):
+            miss += 1
+            continue
+        spk_id = ref_utt.split("_")[0]
+        items.append(
+            {
+                "id": uid,
+                "text": "",
+                "ref_wav": ref,
+                "spk_id": spk_id,
+                "speaker": "",
+                "language": "",
+                "duration": 0.0,
+                "dnsmos": None,
+            }
+        )
+
+    if miss:
+        print(f"[INFO] Missing ref flac for {miss} ids (skipped)")
+
+    if not items:
+        raise RuntimeError("[spk-ZRF] No valid items with existing enrollment flac found.")
+
+    pairs = build_testset_spkzrf(
+        items,
+        gen_root_theta=args.gen_wav_dir_pretrained_unconditional,
+        gen_root_tminus=args.gen_wav_dir,
+        skip_missing_gen=args.skip_missing_gen,
+        gen_name_tpl=args.gen_name_tpl,
+    )
+    print(f"[INFO] Paired {len(pairs)} ids for spk-ZRF")
+
+    device = torch.device("cuda")
+    results, spkzrf_mean = run_spkzrf(
+        pairs,
+        sv_model_name=ckpt_dir,
+        target_sr=16000,
+        batch_size=args.batch_size,
+        device=device,
+        use_amp=True,
+        embed_batch_size=2,
+        max_seconds=8.0,
+    )
+
+    return results, spkzrf_mean

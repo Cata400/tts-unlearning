@@ -319,6 +319,9 @@ def run_spkzrf(
                 torch.cuda.empty_cache()
 
         if embs_cpu:
+            for j in range(len(embs_cpu)):
+                if len(embs_cpu[j].shape) == 1:
+                    embs_cpu[j] = embs_cpu[j].view(1, -1)
             emb_cat = torch.cat(embs_cpu, dim=0)
             if len(emb_cat.shape) == 1:
                 emb_cat = emb_cat.view(1, -1)
@@ -394,7 +397,7 @@ def run_spkzrf(
             _process_batch(ids, buf_theta, buf_tminus)
             ids, buf_theta, buf_tminus = [], [], []
 
-    print(len(buf_theta))
+    # print(f"{len(buf_theta)=}")
     _process_batch(ids, buf_theta, buf_tminus)
 
     spkzrf_mean = float(1.0 - np.mean(jsd_vals)) if jsd_vals else 0.0

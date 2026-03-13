@@ -10,22 +10,68 @@
 
 
 ########### Arguments ###########
-### $1: config
-### $2: number of gpus (optional, default: 1)
+### Named args (preferred):
+###   --config CONFIG
+###   --n_gpus N
+### Positional args (backwards compatible):
+###   $1: config
+###   $2: n_gpus (default: 1)
 #################################
 
-CONFIG=$1
-echo "CONFIG: $CONFIG"
+usage() {
+    echo "Usage: $0 --config CONFIG [--n_gpus N]"
+    echo "       $0 CONFIG [N_GPUS]"
+}
 
-# if the second argument exists, use it, otherwise use the default value
-if [ -z "$2" ]
-then
-    echo "Using default N_GPUS: 1"
-    N_GPUS=1
-else
-    echo "N_GPUS: $2"
-    N_GPUS=$2
+CONFIG=""
+N_GPUS=1
+
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config|--config_name)
+            CONFIG="$2"
+            shift 2
+            ;;
+        --n_gpus|--ngpus)
+            N_GPUS="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$CONFIG" ] && [ "${#POSITIONAL[@]}" -ge 1 ]; then
+    CONFIG="${POSITIONAL[0]}"
 fi
+if [ "${#POSITIONAL[@]}" -ge 2 ]; then
+    N_GPUS="${POSITIONAL[1]}"
+fi
+
+if [ -z "$CONFIG" ]; then
+    echo "Missing required --config (or positional CONFIG)."
+    usage
+    exit 1
+fi
+
+echo "CONFIG: $CONFIG"
+echo "N_GPUS: $N_GPUS"
 
 
 source /etc/profile.d/modules.sh

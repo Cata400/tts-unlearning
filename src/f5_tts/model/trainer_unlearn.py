@@ -931,7 +931,7 @@ class TrainerUnlearn:  # TODO add info logger
             )
 
         ### V4: like V1 but with input_embed also trainable
-        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v4":
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v4":
             trainable_names = (
                 [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
                 + [

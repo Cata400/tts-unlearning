@@ -115,6 +115,8 @@ class TrainerUnlearn:  # TODO add info logger
 
             self.writer = SummaryWriter(log_dir=f"runs/{wandb_run_name}")
 
+        self.model_cfg_dict = model_cfg_dict
+
         self.model = model
         self.teacher = teacher
 
@@ -312,8 +314,15 @@ class TrainerUnlearn:  # TODO add info logger
             if key in checkpoint["ema_model_state_dict"]:
                 del checkpoint["ema_model_state_dict"][key]
 
+        print(f"strict = {not model.transformer.diffit}")
+        print(
+            f'EMA strict = {not self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("use", False)}'
+        )
         if self.is_main:
-            self.ema_model.load_state_dict(checkpoint["ema_model_state_dict"])
+            self.ema_model.load_state_dict(
+                checkpoint["ema_model_state_dict"],
+                strict=not self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("use", False),
+            )
 
         if "update" in checkpoint or "step" in checkpoint:
             # patch for backward compatibility, with before f992c4e
@@ -328,7 +337,9 @@ class TrainerUnlearn:  # TODO add info logger
                 if key in checkpoint["model_state_dict"]:
                     del checkpoint["model_state_dict"][key]
 
-            self.accelerator.unwrap_model(model).load_state_dict(checkpoint["model_state_dict"])
+            self.accelerator.unwrap_model(model).load_state_dict(
+                checkpoint["model_state_dict"], strict=not model.transformer.diffit
+            )
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             if self.scheduler:
                 self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -339,7 +350,9 @@ class TrainerUnlearn:  # TODO add info logger
                 for k, v in checkpoint["ema_model_state_dict"].items()
                 if k not in ["initted", "update", "step"]
             }
-            self.accelerator.unwrap_model(model).load_state_dict(checkpoint["model_state_dict"])
+            self.accelerator.unwrap_model(model).load_state_dict(
+                checkpoint["model_state_dict"], strict=not model.transformer.diffit
+            )
             update = 0
 
         del checkpoint
@@ -478,10 +491,22 @@ class TrainerUnlearn:  # TODO add info logger
         train_dataloader, self.scheduler = self.accelerator.prepare(
             train_dataloader, self.scheduler
         )  # actual multi_gpu updates = single_gpu updates / gpu nums
+        print("Load teacher")
         self.load_pretrained_checkpoint(self.teacher)
+        print("Load student")
         self.load_pretrained_checkpoint(self.model)
+        print(self.checkpoint_path, os.listdir(self.checkpoint_path))
         start_update = self.load_checkpoint()
         global_update = start_update
+
+        if self.model.transformer.diffit:
+            self.prepare_model_for_diffit()
+
+        num_trainable_params = sum(
+            p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
+        )
+        print("Number of trainable parameters in student model:", end=" ")
+        print(f"{num_trainable_params / 1e6:.3f}M")
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()
@@ -680,11 +705,22 @@ class TrainerUnlearn:  # TODO add info logger
         train_dataloader, self.scheduler = self.accelerator.prepare(
             train_dataloader, self.scheduler
         )  # actual multi_gpu updates = single_gpu updates / gpu nums
+        print("Load teacher")
         self.load_pretrained_checkpoint(self.teacher)
+        print("Load student")
         self.load_pretrained_checkpoint(self.model)
         print(self.checkpoint_path, os.listdir(self.checkpoint_path))
         start_update = self.load_checkpoint()
         global_update = start_update
+
+        if self.model.transformer.diffit:
+            self.prepare_model_for_diffit()
+
+        num_trainable_params = sum(
+            p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
+        )
+        print("Number of trainable parameters in student model:", end=" ")
+        print(f"{num_trainable_params / 1e6:.3f}M")
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()
@@ -824,3 +860,169 @@ class TrainerUnlearn:  # TODO add info logger
         self.save_checkpoint(global_update, last=True)
 
         self.accelerator.end_training()
+
+    def prepare_model_for_diffit(self):
+        #### V1: norm.weight is trainable, norm.bias is trainable
+        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v1":
+            trainable_names = (
+                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if ".bias" in name
+                    and "input_embed" not in name
+                    and "time_embed" not in name
+                    and "text_embed" not in name
+                ]
+                + [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "norm" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "text_embed" in name
+                ]
+            )
+
+        #### V2: norm.weight is frozen, norm.bias is trainable
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v2":
+            trainable_names = (
+                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if ".bias" in name
+                    and "input_embed" not in name
+                    and "time_embed" not in name
+                    and "text_embed" not in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "norm" in name and ".bias" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "text_embed" in name
+                ]
+            )
+
+        ### V3: like V2 but only bias from text embed
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v3":
+            trainable_names = (
+                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if ".bias" in name
+                    and "input_embed" not in name
+                    and "time_embed" not in name
+                    and "text_embed" not in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "norm" in name and ".bias" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "text_embed" in name and ".bias" in name
+                ]
+            )
+
+        ### V4: like V1 but with input_embed also trainable
+        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v4":
+            trainable_names = (
+                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if ".bias" in name
+                    and "input_embed" not in name
+                    and "time_embed" not in name
+                    and "text_embed" not in name
+                ]
+                + [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "norm" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "text_embed" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "input_embed" in name
+                ]
+            )
+
+        ### V5: Like V2 but with input_embed also trainable
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v5":
+            trainable_names = (
+                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if ".bias" in name
+                    and "input_embed" not in name
+                    and "time_embed" not in name
+                    and "text_embed" not in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "norm" in name and ".bias" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "text_embed" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "input_embed" in name
+                ]
+            )
+
+        ### V6: like V3 but input_embed.bias also trainable
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v6":
+            trainable_names = (
+                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if ".bias" in name
+                    and "input_embed" not in name
+                    and "time_embed" not in name
+                    and "text_embed" not in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "norm" in name and ".bias" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "text_embed" in name and ".bias" in name
+                ]
+                + [
+                    name
+                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                    if "input_embed" in name and ".bias" in name
+                ]
+            )
+        else:
+            raise ValueError(f"Unknown DiffIT version: {self.model_cfg['model']['finetune']['diffit']['version']}")
+
+        print("Trainable parameters for DiffIT:")
+        trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
+        for name in trainable_names:
+            print(f"  - {name}")
+
+        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
+            p.requires_grad = False
+
+        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
+            if n in trainable_names:
+                p.requires_grad = True

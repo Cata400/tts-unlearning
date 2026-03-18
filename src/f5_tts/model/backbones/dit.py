@@ -6,6 +6,7 @@ nt - text sequence
 nw - raw wave length
 d - dimension
 """
+
 # ruff: noqa: F722 F821
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from f5_tts.model.modules import (
     TimestepEmbedding,
     precompute_freqs_cis,
 )
-
 
 # Text embedding
 
@@ -165,8 +165,12 @@ class DiT(nn.Module):
         attn_mask_enabled=False,
         long_skip_connection=False,
         checkpoint_activations=False,
+        diffit=False,
+        diffit_blocks=[],
     ):
         super().__init__()
+
+        self.diffit = diffit
 
         self.time_embed = TimestepEmbedding(dim)
         if text_dim is None:
@@ -186,8 +190,27 @@ class DiT(nn.Module):
         self.dim = dim
         self.depth = depth
 
-        self.transformer_blocks = nn.ModuleList(
-            [
+        # self.transformer_blocks = nn.ModuleList(
+        #     [
+        #         DiTBlock(
+        #             dim=dim,
+        #             heads=heads,
+        #             dim_head=dim_head,
+        #             ff_mult=ff_mult,
+        #             dropout=dropout,
+        #             qk_norm=qk_norm,
+        #             pe_attn_head=pe_attn_head,
+        #             attn_backend=attn_backend,
+        #             attn_mask_enabled=attn_mask_enabled,
+        #         )
+        #         for _ in range(depth)
+        #     ]
+        # )
+
+        self.transformer_blocks = nn.ModuleList()
+        for i in range(depth):
+            block_diffit = diffit and (i in diffit_blocks)
+            self.transformer_blocks.append(
                 DiTBlock(
                     dim=dim,
                     heads=heads,
@@ -198,14 +221,17 @@ class DiT(nn.Module):
                     pe_attn_head=pe_attn_head,
                     attn_backend=attn_backend,
                     attn_mask_enabled=attn_mask_enabled,
+                    diffit=block_diffit,
                 )
-                for _ in range(depth)
-            ]
-        )
+            )
+
         self.long_skip_connection = nn.Linear(dim * 2, dim, bias=False) if long_skip_connection else None
 
         self.norm_out = AdaLayerNorm_Final(dim)  # final modulation
         self.proj_out = nn.Linear(dim, mel_dim)
+
+        if self.diffit:
+            self.gamma_final = nn.Parameter(torch.ones(mel_dim))
 
         self.checkpoint_activations = checkpoint_activations
 
@@ -325,5 +351,7 @@ class DiT(nn.Module):
 
         x = self.norm_out(x, t)
         output = self.proj_out(x)
+        if self.diffit:
+            output = output * self.gamma_final
 
         return output

@@ -55,12 +55,25 @@ def main(model_cfg):
 
     # set models
     model = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=model_cfg.model.mel_spec.n_mel_channels),
+        transformer=model_cls(
+            **model_arc,
+            text_num_embeds=vocab_size,
+            mel_dim=model_cfg.model.mel_spec.n_mel_channels,
+            diffit=model_cfg["model"].get("finetune", {}).get("diffit", {}).get("use", False),
+            diffit_blocks=model_cfg["model"].get("finetune", {}).get("diffit", {}).get("diffit_blocks", []),
+        ),
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
     )
+
     teacher = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=model_cfg.model.mel_spec.n_mel_channels),
+        transformer=model_cls(
+            **model_arc,
+            text_num_embeds=vocab_size,
+            mel_dim=model_cfg.model.mel_spec.n_mel_channels,
+            diffit=False,
+            diffit_blocks=[],
+        ),
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
     )

@@ -6,6 +6,7 @@ nt - text sequence
 nw - raw wave length
 d - dimension
 """
+
 # ruff: noqa: F722 F821
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from torch import nn
 from x_transformers.x_transformers import apply_rotary_pos_emb
 
 from f5_tts.model.utils import is_package_available
-
 
 # raw wav to mel spec
 
@@ -374,12 +374,14 @@ class Attention(nn.Module):
         context_dim: Optional[int] = None,  # if not None -> joint attention
         context_pre_only: bool = False,
         qk_norm: Optional[str] = None,
+        diffit=False,
     ):
         super().__init__()
 
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError("Attention equires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
 
+        self.diffit = diffit
         self.processor = processor
 
         self.dim = dim
@@ -393,6 +395,11 @@ class Attention(nn.Module):
         self.to_q = nn.Linear(dim, self.inner_dim)
         self.to_k = nn.Linear(dim, self.inner_dim)
         self.to_v = nn.Linear(dim, self.inner_dim)
+
+        if self.diffit:
+            self.gamma_q = nn.Parameter(torch.ones(self.inner_dim))
+            self.gamma_k = nn.Parameter(torch.ones(self.inner_dim))
+            self.gamma_v = nn.Parameter(torch.ones(self.inner_dim))
 
         if qk_norm is None:
             self.q_norm = None
@@ -469,6 +476,11 @@ class AttnProcessor:
         query = attn.to_q(x)
         key = attn.to_k(x)
         value = attn.to_v(x)
+
+        if attn.diffit:
+            query = query * attn.gamma_q
+            key = key * attn.gamma_k
+            value = value * attn.gamma_v
 
         # attention
         inner_dim = key.shape[-1]
@@ -660,6 +672,7 @@ class DiTBlock(nn.Module):
         pe_attn_head=None,
         attn_backend="torch",  # "torch" or "flash_attn"
         attn_mask_enabled=True,
+        diffit=False,
     ):
         super().__init__()
 
@@ -675,10 +688,16 @@ class DiTBlock(nn.Module):
             dim_head=dim_head,
             dropout=dropout,
             qk_norm=qk_norm,
+            diffit=diffit,
         )
 
         self.ff_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
+
+        self.diffit = diffit
+        if self.diffit:
+            self.gamma_attn = nn.Parameter(torch.ones(dim))
+            self.gamma_ff = nn.Parameter(torch.ones(dim))
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
         # pre-norm & modulation for attention input
@@ -686,12 +705,16 @@ class DiTBlock(nn.Module):
 
         # attention
         attn_output = self.attn(x=norm, mask=mask, rope=rope)
+        if self.diffit:
+            attn_output = attn_output * self.gamma_attn
 
         # process attention output for input x
         x = x + gate_msa.unsqueeze(1) * attn_output
 
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         ff_output = self.ff(norm)
+        if self.diffit:
+            ff_output = ff_output * self.gamma_ff
         x = x + gate_mlp.unsqueeze(1) * ff_output
 
         return x

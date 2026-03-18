@@ -1013,7 +1013,7 @@ class TrainerUnlearn:  # TODO add info logger
                 ]
             )
         else:
-            raise ValueError(f"Unknown DiffIT version: {self.model_cfg['model']['finetune']['diffit']['version']}")
+            raise ValueError(f"Unknown DiffIT version: {self.model_cfg_dict['model']['finetune']['diffit']['version']}")
 
         print("Trainable parameters for DiffIT:")
         trainable_names = sorted(list(set(trainable_names)))  # remove duplicates

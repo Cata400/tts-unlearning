@@ -136,7 +136,13 @@ def main():
 
     # Model
     model = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
+        transformer=model_cls(
+            **model_arc,
+            text_num_embeds=vocab_size,
+            mel_dim=model_cfg.model.mel_spec.n_mel_channels,
+            diffit=model_cfg["model"].get("finetune", {}).get("diffit", {}).get("use", False),
+            diffit_blocks=model_cfg["model"].get("finetune", {}).get("diffit", {}).get("diffit_blocks", []),
+        ),
         mel_spec_kwargs=dict(
             n_fft=n_fft,
             hop_length=hop_length,

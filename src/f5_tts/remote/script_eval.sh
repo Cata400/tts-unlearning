@@ -107,3 +107,5 @@ echo "Evaluating WER"
 python3 ./eval/eval_libritts.py --eval_task wer --config_name $CONFIG_NAME  --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
 echo "Evaluating spk-ZRF"
 python3 ./eval/eval_libritts.py --eval_task spk-ZRF --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --gen_wav_dir_pretrained_unconditional $GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL
+echo "Evaluating DIVERSITY"
+python3 ./eval/eval_libritts.py --eval_task diversity --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH

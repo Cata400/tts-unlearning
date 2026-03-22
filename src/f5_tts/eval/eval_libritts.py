@@ -16,6 +16,7 @@ from omegaconf import OmegaConf
 from f5_tts.eval.utils_eval import (
     get_libritts_test,
     run_asr_wer,
+    run_diversity,
     run_sim_v2,
     run_spk_ZRF_pipeline_libritts,
 )
@@ -29,7 +30,7 @@ rel_path = str(files("f5_tts").joinpath("../../"))
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--seed", default=42, type=int)
-    parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer", "spk-ZRF"])
+    parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer", "spk-ZRF", "diversity"])
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
     parser.add_argument("-p", "--processed_libritts_path", type=str, required=True)
@@ -119,7 +120,7 @@ def main():
     forget_speakers = model_cfg.unlearn.forget_speakers
 
     gpus = parse_gpu_nums(args.gpu_nums)
-    if eval_task in ["sim", "wer"]:
+    if eval_task in ["sim", "wer", "diversity"]:
         test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
 
     local = args.local
@@ -128,7 +129,7 @@ def main():
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
 
-    if eval_task in ["sim", "spk-ZRF"]:
+    if eval_task in ["sim", "spk-ZRF", "diversity"]:
         if sim_model_type == "wavlm_large_finetune":
             wavlm_ckpt_dir = os.path.join(rel_path, "ckpts", "UniSpeech", "wavlm_large_finetune.pth")
         elif sim_model_type == "wavlm_base_plus_sv":
@@ -138,7 +139,7 @@ def main():
         elif sim_model_type == "wavlm_large":
             wavlm_ckpt_dir = "microsoft/wavlm-large"
         else:
-            raise ValueError(f"Similarity model ty[e {sim_model_type} is not available")
+            raise ValueError(f"Similarity model type {sim_model_type} is not available")
     # --------------------------------------------------------------------------
 
     full_results = []
@@ -151,6 +152,8 @@ def main():
         full_results = run_sim_v2((test_set[0][0], test_set[0][1], wavlm_ckpt_dir, sim_model_type))
     elif eval_task == "spk-ZRF":
         full_results, _ = run_spk_ZRF_pipeline_libritts(args, wavlm_ckpt_dir)
+    elif eval_task == "diversity":
+        full_results = run_diversity((test_set[0][0], test_set[0][1], wavlm_ckpt_dir, sim_model_type))
     else:
         raise ValueError(f"Unknown metric type: {eval_task}")
 

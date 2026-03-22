@@ -692,6 +692,83 @@ def run_sim_v2(args):
     return sim_results
 
 
+def run_diversity(args):
+    rank, test_set, ckpt_dir, model_type = args
+    device = f"cuda:{rank}"
+
+    if model_type == "speechbrain_ecapa":
+        model = EncoderClassifier.from_hparams(source=ckpt_dir)
+    else:
+        raise NotImplementedError("Currently only support speechbrain_ecapa for diversity evaluation.")
+
+    use_gpu = True if torch.cuda.is_available() else False
+    if use_gpu:
+        model = model.cuda(device)
+    model.eval()
+
+    # Get all embeddings
+    all_embeddings = []
+    for gen_wav, _, _ in tqdm(test_set, desc="Processing embeddings for diversity evaluation..."):
+        wav, sr = torchaudio.load(gen_wav)
+
+        if use_gpu:
+            wav = wav.cuda(device)
+
+        if sr != 16000:
+            resample1 = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+            if use_gpu:
+                resample1 = resample1.cuda(device)
+            wav = resample1(wav)
+            sr = 16000
+
+        with torch.no_grad():
+            if model_type == "speechbrain_ecapa":
+                wav_sb = wav.mean(dim=0)
+                wavs = torch.nn.utils.rnn.pad_sequence([wav_sb], batch_first=True)
+                lengths = torch.tensor([wav_sb.shape[0]], device=wavs.device, dtype=torch.float32)
+                wav_lens = lengths / lengths.max().clamp(min=1.0)
+                embeddings = model.encode_batch(wavs, wav_lens)
+                emb = embeddings[0]
+
+                all_embeddings.append(
+                    {
+                        "wav": Path(gen_wav).stem,
+                        "embedding": emb,
+                    }
+                )
+
+    # Group embeddings by speaker
+    speaker_embeddings = {}
+    for embedding in all_embeddings:
+        wav_name = embedding["wav"]
+        speaker = wav_name.split("_", 1)[0]
+        speaker_embeddings.setdefault(speaker, []).append(embedding)
+
+    diversity_results = []
+    for speaker_i in tqdm(speaker_embeddings, desc="Processing speaker embeddings..."):
+        for emb_i in speaker_embeddings[speaker_i]:
+            similarities = []
+            for speaker_j in speaker_embeddings:
+                if speaker_i == speaker_j:
+                    continue
+
+                for emb_j in speaker_embeddings[speaker_j]:
+                    sim = F.cosine_similarity(emb_i["embedding"], emb_j["embedding"])[0].item()
+                    similarities.append(sim)
+
+            average_sim = sum(similarities) / len(similarities) if similarities else 0.0
+            diversity = (1.0 - average_sim) / 2.0  # Normalize to [0, 1]
+
+            diversity_results.append(
+                {
+                    "wav": Path(emb_i["wav"]).stem,
+                    "diversity": diversity,
+                }
+            )
+
+    return diversity_results
+
+
 ######## SPK-ZRF FROM TRUS
 UTT_RE_LIBRITTS = re.compile(r"\b(\d{1,6}_\d{1,6}_\d{1,6}_\d{1,6})\b")
 UTT_RE_LIBRISPEECH = re.compile(r"\b(\d{1,6}-\d{1,6}-\d{1,6})\b")

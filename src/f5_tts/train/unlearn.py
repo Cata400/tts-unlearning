@@ -38,6 +38,17 @@ def main(model_cfg):
             unlearn_method = method
             break
 
+    finetune_methods_use = [params.use for _, params in model_cfg.model.finetune.items()]
+    assert sum(finetune_methods_use) <= 1, "Multiple finetune methods cannot be used at the same time"
+
+    if sum(finetune_methods_use) == 0:
+        print("The entire model will be finetuned without any parameter freezing.")
+    else:
+        for method, params in model_cfg.model.finetune.items():
+            if params.use:
+                print(f"Using finetune method {method} with params: {params}")
+                break
+
     model_cls = hydra.utils.get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
     tokenizer = model_cfg.model.tokenizer

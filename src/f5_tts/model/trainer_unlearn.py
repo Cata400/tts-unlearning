@@ -499,8 +499,10 @@ class TrainerUnlearn:  # TODO add info logger
         start_update = self.load_checkpoint()
         global_update = start_update
 
-        if self.model.transformer.diffit:
+        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("use", False):
             self.prepare_model_for_diffit()
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
+            self.prepare_model_for_dit_blocks_mlp()
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -713,8 +715,10 @@ class TrainerUnlearn:  # TODO add info logger
         start_update = self.load_checkpoint()
         global_update = start_update
 
-        if self.model.transformer.diffit:
+        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("use", False):
             self.prepare_model_for_diffit()
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
+            self.prepare_model_for_dit_blocks_mlp()
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -1016,6 +1020,48 @@ class TrainerUnlearn:  # TODO add info logger
             raise ValueError(f"Unknown DiffIT version: {self.model_cfg_dict['model']['finetune']['diffit']['version']}")
 
         print("Trainable parameters for DiffIT:")
+        trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
+        for name in trainable_names:
+            print(f"  - {name}")
+
+        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
+            p.requires_grad = False
+
+        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
+            if n in trainable_names:
+                p.requires_grad = True
+
+    def prepare_model_for_dit_blocks_mlp(self):
+        #### V1: only FFN and attn out projection are trainable in the specified blocks
+        if self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("version") == "v1":
+            trainable_names = [
+                name
+                for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                for i in self.model_cfg_dict["model"]["finetune"]["dit_blocks_mlp"]["blocks"]
+                if f"transformer_blocks.{i}" in name
+            ]
+            trainable_names = [
+                name for name in trainable_names if any(keyword in name for keyword in ["ff", "attn.to_out"])
+            ]
+        #### V2: only FFN and all attn projections are trainable in the specified blocks
+        elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("version") == "v2":
+            trainable_names = [
+                name
+                for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+                for i in self.model_cfg_dict["model"]["finetune"]["dit_blocks_mlp"]["blocks"]
+                if f"transformer_blocks.{i}" in name
+            ]
+            trainable_names = [
+                name
+                for name in trainable_names
+                if any(keyword in name for keyword in ["ff", "attn.to_out", "attn.to_k", "attn.to_q", "attn.to_v"])
+            ]
+        else:
+            raise ValueError(
+                f"Unknown DIT blocks MLP version: {self.model_cfg_dict['model']['finetune']['dit_blocks_mlp']['version']}"
+            )
+
+        print("Trainable parameters for DIT blocks MLP:")
         trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
         for name in trainable_names:
             print(f"  - {name}")

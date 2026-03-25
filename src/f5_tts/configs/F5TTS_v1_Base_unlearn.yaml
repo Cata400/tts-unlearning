@@ -47,9 +47,13 @@ model:
     local_path: null  # local vocoder path
   finetune:
     diffit:
-      use: True
+      use: False
       diffit_blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-      version: v1 # v1 | v2 | v3 | v4 | v5 | v6
+      version: v6 # v1 | v2 | v3 | v4 | v5 | v6
+    dit_blocks_mlp:
+      use: True
+      blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      version: v1 # v1 | v2
 
 ckpts:
   logger: tensorboard  # wandb | tensorboard | null

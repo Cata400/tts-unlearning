@@ -1038,7 +1038,7 @@ class TrainerUnlearn:  # TODO add info logger
                 name
                 for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
                 for i in self.model_cfg_dict["model"]["finetune"]["dit_blocks_mlp"]["blocks"]
-                if f"transformer_blocks.{i}" in name
+                if f"transformer_blocks.{i}." in name
             ]
             trainable_names = [
                 name for name in trainable_names if any(keyword in name for keyword in ["ff", "attn.to_out"])
@@ -1049,7 +1049,7 @@ class TrainerUnlearn:  # TODO add info logger
                 name
                 for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
                 for i in self.model_cfg_dict["model"]["finetune"]["dit_blocks_mlp"]["blocks"]
-                if f"transformer_blocks.{i}" in name
+                if f"transformer_blocks.{i}." in name
             ]
             trainable_names = [
                 name

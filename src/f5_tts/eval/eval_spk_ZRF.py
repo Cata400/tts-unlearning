@@ -14,6 +14,7 @@ import unicodedata
 import numpy as np
 import torch
 import torchaudio
+from resemblyzer import VoiceEncoder, preprocess_wav
 from speechbrain.inference.speaker import EncoderClassifier
 from tqdm import tqdm
 from transformers import AutoFeatureExtractor, WavLMForXVector
@@ -259,6 +260,10 @@ def run_spkzrf(
         backbone = WavLMForXVector.from_pretrained(sv_model_name).to(device)
     elif sv_model_name == "speechbrain/spkrec-ecapa-voxceleb":
         backbone = EncoderClassifier.from_hparams(source=sv_model_name)
+    elif sv_model_name == "resemblyzer":
+        backbone = VoiceEncoder()
+    else:
+        raise NotImplementedError(f"Speaker verification model {sv_model_name} not supported for spk-ZRF evaluation.")
     backbone.eval()
 
     def _embed(wavs_list):
@@ -311,6 +316,10 @@ def run_spkzrf(
                     else:
                         emb = backbone.encode_batch(inputs, chunk_lens)
                 emb = emb.squeeze()
+            elif sv_model_name == "resemblyzer":
+                inputs = [preprocess_wav(w, source_sr=sr) for w in proc_chunk]
+                embs = [torch.from_numpy(backbone.embed_utterance(w)).unsqueeze(0).to(device) for w in inputs]
+                emb = torch.cat(embs, dim=0)
 
             embs_cpu.append(emb.detach().cpu())
 

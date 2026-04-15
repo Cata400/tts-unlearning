@@ -43,8 +43,6 @@ dependencies = [
     "unidecode",
     "vocos",
     "wandb",
-    "x_transformers>=1.31.14",
-    "speechbrain",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +53,10 @@ eval = [
     "modelscope",
     "zhconv",
     "zhon",
+    "x_transformers>=1.31.14",
+    "speechbrain",
+    "resemblyzer",
+    "utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git",
 ]
 
 [project.urls]

@@ -19,6 +19,7 @@ from f5_tts.eval.utils_eval import (
     run_diversity,
     run_sim_v2,
     run_spk_ZRF_pipeline_libritts,
+    run_utmosv2,
 )
 
 sys.path.append(os.getcwd())
@@ -30,7 +31,9 @@ rel_path = str(files("f5_tts").joinpath("../../"))
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--seed", default=42, type=int)
-    parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer", "spk-ZRF", "diversity"])
+    parser.add_argument(
+        "-e", "--eval_task", type=str, default="wer", choices=["sim", "wer", "spk-ZRF", "diversity", "utmosv2"]
+    )
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
     parser.add_argument("-p", "--processed_libritts_path", type=str, required=True)
@@ -42,7 +45,7 @@ def get_args():
         "--sim_model_type",
         type=str,
         default="speechbrain_ecapa",
-        choices=["wavlm_large_finetune", "wavlm_base_plus_sv", "speechbrain_ecapa"],
+        choices=["wavlm_large_finetune", "wavlm_base_plus_sv", "speechbrain_ecapa", "resemblyzer"],
     )
     parser.add_argument("--config_name", type=str, default="F5TTS_v1_Base_unlearn")
     # spk-ZRF args
@@ -120,7 +123,7 @@ def main():
     forget_speakers = model_cfg.unlearn.forget_speakers
 
     gpus = parse_gpu_nums(args.gpu_nums)
-    if eval_task in ["sim", "wer", "diversity"]:
+    if eval_task in ["sim", "wer", "diversity", "utmosv2"]:
         test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
 
     local = args.local
@@ -138,6 +141,8 @@ def main():
             wavlm_ckpt_dir = "speechbrain/spkrec-ecapa-voxceleb"
         elif sim_model_type == "wavlm_large":
             wavlm_ckpt_dir = "microsoft/wavlm-large"
+        elif sim_model_type == "resemblyzer":
+            wavlm_ckpt_dir = "resemblyzer"
         else:
             raise ValueError(f"Similarity model type {sim_model_type} is not available")
     # --------------------------------------------------------------------------
@@ -154,6 +159,8 @@ def main():
         full_results, _ = run_spk_ZRF_pipeline_libritts(args, wavlm_ckpt_dir)
     elif eval_task == "diversity":
         full_results = run_diversity((test_set[0][0], test_set[0][1], wavlm_ckpt_dir, sim_model_type))
+    elif eval_task == "utmosv2":
+        full_results = run_utmosv2(test_set[0][1])
     else:
         raise ValueError(f"Unknown metric type: {eval_task}")
 

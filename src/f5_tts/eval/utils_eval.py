@@ -10,6 +10,8 @@ import soundfile as sf
 import torch
 import torch.nn.functional as F
 import torchaudio
+import utmosv2
+from resemblyzer import VoiceEncoder, preprocess_wav
 from speechbrain.inference.speaker import EncoderClassifier
 from tqdm import tqdm
 from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
@@ -628,6 +630,9 @@ def run_sim_v2(args):
     elif model_type == "speechbrain_ecapa":
         model = EncoderClassifier.from_hparams(source=ckpt_dir)
 
+    elif model_type == "resemblyzer":
+        model = VoiceEncoder()
+
     use_gpu = True if torch.cuda.is_available() else False
     if use_gpu:
         model = model.cuda(device)
@@ -679,6 +684,11 @@ def run_sim_v2(args):
                 wav_lens = lengths / lengths.max().clamp(min=1.0)
                 embeddings = model.encode_batch(wavs, wav_lens)
                 emb1, emb2 = embeddings[0], embeddings[1]
+            elif model_type == "resemblyzer":
+                wav1_np = preprocess_wav(gen_wav, source_sr=sr1)
+                wav2_np = preprocess_wav(prompt_wav, source_sr=sr2)
+                emb1 = torch.from_numpy(model.embed_utterance(wav1_np)).unsqueeze(0).cuda(device)
+                emb2 = torch.from_numpy(model.embed_utterance(wav2_np)).unsqueeze(0).cuda(device)
 
         sim = F.cosine_similarity(emb1, emb2)[0].item()
         # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")
@@ -698,8 +708,11 @@ def run_diversity(args):
 
     if model_type == "speechbrain_ecapa":
         model = EncoderClassifier.from_hparams(source=ckpt_dir)
+
+    elif model_type == "resemblyzer":
+        model = VoiceEncoder()
     else:
-        raise NotImplementedError("Currently only support speechbrain_ecapa for diversity evaluation.")
+        raise NotImplementedError("Currently only support speechbrain_ecapa and resemblyzer for diversity evaluation.")
 
     use_gpu = True if torch.cuda.is_available() else False
     if use_gpu:
@@ -730,12 +743,16 @@ def run_diversity(args):
                 embeddings = model.encode_batch(wavs, wav_lens)
                 emb = embeddings[0]
 
-                all_embeddings.append(
-                    {
-                        "wav": Path(gen_wav).stem,
-                        "embedding": emb,
-                    }
-                )
+            elif model_type == "resemblyzer":
+                wav_np = preprocess_wav(gen_wav, source_sr=sr)
+                emb = torch.from_numpy(model.embed_utterance(wav_np)).unsqueeze(0).cuda(device)
+
+        all_embeddings.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "embedding": emb,
+            }
+        )
 
     # Group embeddings by speaker
     speaker_embeddings = {}
@@ -767,6 +784,22 @@ def run_diversity(args):
             )
 
     return diversity_results
+
+
+def run_utmosv2(test_set):
+    model = utmosv2.create_model(pretrained=True)
+
+    utmosv2_results = []
+    for gen_wav, _, _ in tqdm(test_set):
+        utmosv2_score = model.predict(input_path=gen_wav, verbose=False)
+        utmosv2_results.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "sim": utmosv2_score,
+            }
+        )
+
+    return utmosv2_results
 
 
 ######## SPK-ZRF FROM TRUS

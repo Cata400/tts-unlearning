@@ -633,7 +633,7 @@ def run_sim_v2(args):
     elif model_type == "resemblyzer":
         model = VoiceEncoder()
 
-    use_gpu = True if torch.cuda.is_available() else False
+    use_gpu = torch.cuda.is_available() and model_type != "resemblyzer"
     if use_gpu:
         model = model.cuda(device)
     model.eval()
@@ -687,8 +687,8 @@ def run_sim_v2(args):
             elif model_type == "resemblyzer":
                 wav1_np = preprocess_wav(gen_wav, source_sr=sr1)
                 wav2_np = preprocess_wav(prompt_wav, source_sr=sr2)
-                emb1 = torch.from_numpy(model.embed_utterance(wav1_np)).unsqueeze(0).cuda(device)
-                emb2 = torch.from_numpy(model.embed_utterance(wav2_np)).unsqueeze(0).cuda(device)
+                emb1 = torch.from_numpy(model.embed_utterance(wav1_np)).unsqueeze(0)
+                emb2 = torch.from_numpy(model.embed_utterance(wav2_np)).unsqueeze(0)
 
         sim = F.cosine_similarity(emb1, emb2)[0].item()
         # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")
@@ -714,7 +714,7 @@ def run_diversity(args):
     else:
         raise NotImplementedError("Currently only support speechbrain_ecapa and resemblyzer for diversity evaluation.")
 
-    use_gpu = True if torch.cuda.is_available() else False
+    use_gpu = torch.cuda.is_available() and model_type != "resemblyzer"
     if use_gpu:
         model = model.cuda(device)
     model.eval()
@@ -745,7 +745,7 @@ def run_diversity(args):
 
             elif model_type == "resemblyzer":
                 wav_np = preprocess_wav(gen_wav, source_sr=sr)
-                emb = torch.from_numpy(model.embed_utterance(wav_np)).unsqueeze(0).cuda(device)
+                emb = torch.from_numpy(model.embed_utterance(wav_np)).unsqueeze(0)
 
         all_embeddings.append(
             {

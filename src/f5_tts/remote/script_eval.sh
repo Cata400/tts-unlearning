@@ -54,6 +54,10 @@ while [ $# -gt 0 ]; do
             GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL="$2"
             shift 2
             ;;
+        --sim_model_type)
+            SIM_MODEL_TYPE="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -86,6 +90,9 @@ fi
 if [ "${#POSITIONAL[@]}" -ge 4 ]; then
     GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL="${POSITIONAL[3]}"
 fi
+if [ "${#POSITIONAL[@]}" -ge 5 ]; then
+    SIM_MODEL_TYPE="${POSITIONAL[4]}"
+fi
 
 if [ -z "$GEN_WAV_DIR" ]; then
     echo "Missing required --gen_wav_dir (or positional GEN_WAV_DIR)."
@@ -102,7 +109,7 @@ echo "SIM_MODEL_TYPE: $SIM_MODEL_TYPE"
 
 source /etc/profile.d/modules.sh
 module load anaconda/3
-module load cuda/12.6-9.5
+# module load cuda/12.6-9.5
 conda activate f5-tts
 
 echo "Evaluating SIM"

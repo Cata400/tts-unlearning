@@ -176,9 +176,7 @@ def main():
         "all_results": full_results,
     }
 
-    result_path = (
-        f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF'] else ''}.json"
-    )
+    result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF', 'diversity'] else ''}.json"
     with open(result_path, "w") as f:
         json.dump(all_results, f, indent=4)
 

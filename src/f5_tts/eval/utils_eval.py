@@ -795,7 +795,7 @@ def run_utmosv2(test_set):
         utmosv2_results.append(
             {
                 "wav": Path(gen_wav).stem,
-                "sim": utmosv2_score,
+                "utmosv2": utmosv2_score,
             }
         )
 

@@ -215,7 +215,7 @@ def get_inference_prompt(
             ), f"Audio {utt} total duration (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]."
         except AssertionError:
             print(
-                f"Warning: Audio {utt} total dura, ```<checkpoint>``` is the model checkpointtion (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]. Skipped."
+                f"Warning: Audio {utt} total duration (prompt + gt) has {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]. Skipped."
             )
             continue
         bucket_i = math.floor((total_mel_len - min_tokens) / (max_tokens - min_tokens + 1) * num_buckets)

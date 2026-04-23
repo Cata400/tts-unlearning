@@ -56,7 +56,7 @@ model:
       version: v1 # v1 | v2
 
 ckpts:
-  logger: tensorboard  # wandb | tensorboard | null
+  logger: wandb # wandb | tensorboard | null
   log_samples: True  # infer random sample per save checkpoint. wip, normal to fail with extra long samples
   save_per_updates: 100000  # save checkpoint per updates
   keep_last_n_checkpoints: -1  # -1 to keep all, 0 to not save intermediate, > 0 to keep last N checkpoints

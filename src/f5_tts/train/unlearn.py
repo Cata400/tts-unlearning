@@ -54,7 +54,7 @@ def main(model_cfg):
     tokenizer = model_cfg.model.tokenizer
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
 
-    exp_name = f"{model_cfg.model.name}_{mel_spec_type}_{model_cfg.model.tokenizer}_{model_cfg.datasets.name}"
+    exp_name = model_cfg.ckpts.save_dir.split("/")[-1]
     wandb_resume_id = None
 
     # set text tokenizer
@@ -106,7 +106,7 @@ def main(model_cfg):
         grad_accumulation_steps=model_cfg.optim.grad_accumulation_steps,
         max_grad_norm=model_cfg.optim.max_grad_norm,
         logger=model_cfg.ckpts.logger,
-        wandb_project="CFM-TTS",
+        wandb_project="F5-TTS-Unlearning",
         wandb_run_name=exp_name,
         wandb_resume_id=wandb_resume_id,
         last_per_updates=model_cfg.ckpts.last_per_updates,

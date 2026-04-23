@@ -5,7 +5,6 @@ import math
 import os
 
 import torch
-import wandb
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from ema_pytorch import EMA
@@ -19,6 +18,7 @@ from torch.utils.data import (
 )
 from tqdm import tqdm
 
+import wandb
 from f5_tts.infer.utils_infer import (
     cfg_strength,
     nfe_step,
@@ -110,6 +110,9 @@ class TrainerUnlearn:  # TODO add info logger
                 config=model_cfg_dict,
             )
 
+            if self.accelerator.is_local_main_process:
+                self._define_wandb_metrics()
+
         elif self.logger == "tensorboard":
             from torch.utils.tensorboard import SummaryWriter
 
@@ -167,6 +170,17 @@ class TrainerUnlearn:  # TODO add info logger
     @property
     def is_main(self):
         return self.accelerator.is_main_process
+
+    def _define_wandb_metrics(self):
+        wandb.define_metric("train_step")
+        wandb.define_metric("loss", step_metric="train_step")
+        wandb.define_metric("lr", step_metric="train_step")
+        wandb.define_metric("weight_stats_step")
+        wandb.define_metric("weight_stats/*", step_metric="weight_stats_step")
+
+    @staticmethod
+    def _weight_stat_metric_prefix(name: str) -> str:
+        return f"weight_stats/{name.replace('.', '/')}"
 
     def save_checkpoint(self, update, last=False):
         self.accelerator.wait_for_everyone()
@@ -625,7 +639,8 @@ class TrainerUnlearn:  # TODO add info logger
 
                 if self.accelerator.is_local_main_process:
                     self.accelerator.log(
-                        {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}, step=global_update
+                        {"train_step": global_update, "loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]},
+                        step=global_update,
                     )
                     if self.logger == "tensorboard":
                         self.writer.add_scalar("loss", loss.item(), global_update)
@@ -740,6 +755,7 @@ class TrainerUnlearn:  # TODO add info logger
         else:
             skipped_epoch = 0
 
+        weight_stats_update_interval = max(1, math.ceil(len(train_dataloader) / (4 * self.grad_accumulation_steps)))
         for epoch in range(skipped_epoch, self.epochs):
             self.model.train()
             if exists(resumable_with_seed) and epoch == skipped_epoch:
@@ -761,7 +777,7 @@ class TrainerUnlearn:  # TODO add info logger
                 initial=progress_bar_initial,
             )
 
-            for batch in current_dataloader:
+            for i, batch in enumerate(current_dataloader):
                 with self.accelerator.accumulate(self.model):
                     text_inputs_retain = batch["text_retain"]
                     text_inputs_forget = batch["text_forget"]
@@ -814,11 +830,27 @@ class TrainerUnlearn:  # TODO add info logger
 
                 if self.accelerator.is_local_main_process:
                     self.accelerator.log(
-                        {"loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]}, step=global_update
+                        {"train_step": global_update, "loss": loss.item(), "lr": self.scheduler.get_last_lr()[0]},
+                        step=global_update,
                     )
                     if self.logger == "tensorboard":
                         self.writer.add_scalar("loss", loss.item(), global_update)
                         self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
+
+                    if self.accelerator.sync_gradients and (
+                        global_update % weight_stats_update_interval == 0 or i == 0
+                    ):
+                        weight_stats = {"weight_stats_step": global_update // weight_stats_update_interval}
+                        for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
+                            if param.requires_grad and ".weight" in name:
+                                l2_norm = torch.norm(param.data, p=2).item()
+                                frobenius_norm = torch.norm(param.data, p="fro").item()
+                                soft_sparsity = (param.data.abs() < 1e-3).float().mean().item()
+                                metric_prefix = self._weight_stat_metric_prefix(name)
+                                weight_stats[f"{metric_prefix}/l2_norm"] = l2_norm
+                                weight_stats[f"{metric_prefix}/frobenius_norm"] = frobenius_norm
+                                weight_stats[f"{metric_prefix}/soft_sparsity"] = soft_sparsity
+                        self.accelerator.log(weight_stats, step=global_update)
 
                 if global_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(global_update, last=True)

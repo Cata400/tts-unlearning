@@ -702,6 +702,88 @@ def run_sim_v2(args):
     return sim_results
 
 
+def run_sim_gt_matching(test_set, ckpt_dir, model_type):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if model_type == "speechbrain_ecapa":
+        model = EncoderClassifier.from_hparams(source=ckpt_dir)
+    elif model_type == "resemblyzer":
+        model = VoiceEncoder()
+    else:
+        raise NotImplementedError(
+            "Currently only support speechbrain_ecapa and resemblyzer for sim gt matching evaluation."
+        )
+
+    use_gpu = torch.cuda.is_available() and model_type != "resemblyzer"
+    if use_gpu:
+        model = model.cuda(device)
+    model.eval()
+
+    # Get all embeddings
+    embeddings_test = {}
+    embeddings_gt = {}
+    for gen_wav, prompt_wav, _ in tqdm(test_set, desc="Extracting embeddings..."):
+        wav1, sr1 = torchaudio.load(gen_wav)
+        wav2, sr2 = torchaudio.load(prompt_wav)
+
+        if use_gpu:
+            wav1 = wav1.cuda(device)
+            wav2 = wav2.cuda(device)
+
+        if sr1 != 16000:
+            resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
+            if use_gpu:
+                resample1 = resample1.cuda(device)
+            wav1 = resample1(wav1)
+            sr1 = 16000
+        if sr2 != 16000:
+            resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
+            if use_gpu:
+                resample2 = resample2.cuda(device)
+            wav2 = resample2(wav2)
+            sr2 = 16000
+
+        with torch.no_grad():
+            if model_type == "speechbrain_ecapa":
+                wav1_sb = wav1.mean(dim=0)
+                wav2_sb = wav2.mean(dim=0)
+                wavs = torch.nn.utils.rnn.pad_sequence([wav1_sb, wav2_sb], batch_first=True)
+                lengths = torch.tensor([wav1_sb.shape[0], wav2_sb.shape[0]], device=wavs.device, dtype=torch.float32)
+                wav_lens = lengths / lengths.max().clamp(min=1.0)
+                embeddings = model.encode_batch(wavs, wav_lens)
+                emb1, emb2 = embeddings[0], embeddings[1]
+            elif model_type == "resemblyzer":
+                wav1_np = preprocess_wav(gen_wav, source_sr=sr1)
+                wav2_np = preprocess_wav(prompt_wav, source_sr=sr2)
+                emb1 = torch.from_numpy(model.embed_utterance(wav1_np)).unsqueeze(0)
+                emb2 = torch.from_numpy(model.embed_utterance(wav2_np)).unsqueeze(0)
+
+        gen_wav_name = Path(gen_wav).stem
+        prompt_wav_name = Path(prompt_wav).stem
+
+        embeddings_test[gen_wav_name] = emb1
+        embeddings_gt[prompt_wav_name] = emb2
+
+    sim_gt_matching_results = []
+    for wav_name in tqdm(embeddings_test, desc="Processing GT matching for sim gt matching evaluation..."):
+        if wav_name not in embeddings_gt:
+            print(f"Warning: GT wav not found for {wav_name}, skipping...")
+            continue
+
+        emb_test = embeddings_test[wav_name]
+        emb_gt = embeddings_gt[wav_name]
+
+        sim = F.cosine_similarity(emb_test, emb_gt)[0].item()
+        sim_gt_matching_results.append(
+            {
+                "wav": wav_name,
+                "sim_gt_matching": sim,
+            }
+        )
+
+    return sim_gt_matching_results
+
+
 def run_diversity(args):
     rank, test_set, ckpt_dir, model_type = args
     device = f"cuda:{rank}"

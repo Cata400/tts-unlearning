@@ -18,6 +18,7 @@ from f5_tts.eval.utils_eval import (
     run_asr_wer,
     run_delta_sim,
     run_diversity,
+    run_sim_gt_matching,
     run_sim_v2,
     run_spk_ZRF_pipeline_libritts,
     run_utmosv2,
@@ -37,7 +38,7 @@ def get_args():
         "--eval_task",
         type=str,
         default="wer",
-        choices=["sim", "wer", "spk-ZRF", "diversity", "utmosv2", "delta_sim"],
+        choices=["sim", "wer", "spk-ZRF", "diversity", "utmosv2", "delta_sim", "sim_gt_matching"],
     )
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
@@ -147,7 +148,7 @@ def main():
     forget_speakers = model_cfg.unlearn.forget_speakers
 
     gpus = parse_gpu_nums(args.gpu_nums)
-    if eval_task in ["sim", "wer", "diversity", "utmosv2", "delta_sim"]:
+    if eval_task in ["sim", "wer", "diversity", "utmosv2", "delta_sim", "sim_gt_matching"]:
         print("Loading test set...")
         test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
     if eval_task == "delta_sim":
@@ -178,7 +179,7 @@ def main():
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
 
-    if eval_task in ["sim", "spk-ZRF", "diversity", "delta_sim"]:
+    if eval_task in ["sim", "spk-ZRF", "diversity", "delta_sim", "sim_gt_matching"]:
         if sim_model_type == "wavlm_large_finetune":
             wavlm_ckpt_dir = os.path.join(rel_path, "ckpts", "UniSpeech", "wavlm_large_finetune.pth")
         elif sim_model_type == "wavlm_base_plus_sv":
@@ -217,6 +218,8 @@ def main():
             args.embeddings_dir_gt,
             args.embeddings_dir_pretrained,
         )
+    elif eval_task == "sim_gt_matching":
+        full_results = run_sim_gt_matching(test_set[0][1], wavlm_ckpt_dir, sim_model_type)
     else:
         raise ValueError(f"Unknown metric type: {eval_task}")
 

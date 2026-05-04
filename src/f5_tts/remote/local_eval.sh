@@ -131,6 +131,8 @@ echo "EMBEDDINGS_DIR_PRETRAINED (delta_sim): $EMBEDDINGS_DIR_PRETRAINED"
 
 echo "Evaluating SIM"
 python3 ./eval/eval_libritts.py --eval_task sim --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE
+echo "Evaluating SIM_GT_MATCHING"
+python3 ./eval/eval_libritts.py --eval_task sim_gt_matching --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE
 echo "Evaluating WER"
 python3 ./eval/eval_libritts.py --eval_task wer --config_name $CONFIG_NAME  --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
 echo "Evaluating spk-ZRF"

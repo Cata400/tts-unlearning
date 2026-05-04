@@ -391,7 +391,9 @@ class TrainerUnlearn:  # TODO add info logger
                 shuffle=True,
                 generator=generator,
             )
-        elif self.batch_size_type == "unlearn_sample":
+        elif (
+            self.batch_size_type == "unlearn_sample"
+        ):  # oversample forget samples to have equal number of forget and retain samples in training
             num_speakers = get_dataset_num_speakers(train_dataset)
             unlearning_class_weights = {
                 1: num_speakers / (num_speakers - len(self.forget_speakers)),

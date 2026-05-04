@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=catalin_unlearn
-#SBATCH --time=99:00:00  # hh:mm:ss . It is usually a good idea to limit your job.
+#SBATCH --time=999:00:00  # hh:mm:ss . It is usually a good idea to limit your job.
 #SBATCH --output=./remote/logs/output_%A.log   # %x_%j_%N.log # %A is the job id
 #SBATCH --error=./remote/logs/error_%A.log  # %x_%j_%N.log # %A is the job id
 #SBATCH --nodes=1

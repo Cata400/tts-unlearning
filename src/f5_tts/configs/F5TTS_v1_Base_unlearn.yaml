@@ -1,11 +1,11 @@
-hydra:
-  run:
-    dir: ckpts/${model.name}_${model.mel_spec.mel_spec_type}_${model.tokenizer}_${datasets.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
-
 datasets:
   name: LibriTTS_100_train_intra_speaker_split_0.2  # dataset name
-  batch_size_per_gpu: 1 # 2048
-  batch_size_type: frame  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
+  ## SGU
+  batch_size_per_gpu: 2 # 2048
+  batch_size_type: balanced_unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
+  ## TGU
+  # batch_size_per_gpu: 4
+  # batch_size_type: unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
   max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
   num_workers: 16
 
@@ -52,7 +52,7 @@ model:
       version: v6 # v1 | v2 | v3 | v4 | v5 | v6
     dit_blocks_mlp:
       use: True
-      blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      blocks: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
       version: v1 # v1 | v2
 
 ckpts:
@@ -66,12 +66,18 @@ ckpts:
 
 unlearn:
   random_seed: 42
-  forget_speakers: [196] # [103]
+  forget_speakers: [196]
+  # forget_speakers: [196, 26, 40, 78, 87]
+  # forget_speakers: [196, 26, 40, 78, 87, 200, 250, 254, 374, 405]
   unlearn_methods:
     TGU:
-      use: true
+      use: false
       lambda: 0.2 # retain weight, 1 - lambda is forget weight
     SGU:
-      use: false
+      use: true
       forget_ratio: 0.2 # probability of optimizing for forget
-      balanced_unlearn_sample_oversample_forget: false # whether to oversample forget samples for balanced_unlearn_sample batch type
+      balanced_unlearn_sample_oversample_forget: true # whether to oversample forget samples for balanced_unlearn_sample batch type
+
+hydra:
+  run:
+    dir: ${ckpts.save_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -708,7 +708,6 @@ def run_diversity(args):
 
     if model_type == "speechbrain_ecapa":
         model = EncoderClassifier.from_hparams(source=ckpt_dir)
-
     elif model_type == "resemblyzer":
         model = VoiceEncoder()
     else:
@@ -737,10 +736,8 @@ def run_diversity(args):
         with torch.no_grad():
             if model_type == "speechbrain_ecapa":
                 wav_sb = wav.mean(dim=0)
-                wavs = torch.nn.utils.rnn.pad_sequence([wav_sb], batch_first=True)
-                lengths = torch.tensor([wav_sb.shape[0]], device=wavs.device, dtype=torch.float32)
-                wav_lens = lengths / lengths.max().clamp(min=1.0)
-                embeddings = model.encode_batch(wavs, wav_lens)
+                wavs = wav_sb.unsqueeze(0)
+                embeddings = model.encode_batch(wavs)
                 emb = embeddings[0]
 
             elif model_type == "resemblyzer":
@@ -800,6 +797,167 @@ def run_utmosv2(test_set):
         )
 
     return utmosv2_results
+
+
+def run_delta_sim(test_set, pretrained_test_set, ckpt_dir, model_type, embedding_dir_gt, embedding_dir_pretrained):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if model_type == "speechbrain_ecapa":
+        model = EncoderClassifier.from_hparams(source=ckpt_dir)
+    elif model_type == "resemblyzer":
+        model = VoiceEncoder()
+    else:
+        raise NotImplementedError("Currently only support speechbrain_ecapa and resemblyzer for delta sim evaluation.")
+
+    use_gpu = torch.cuda.is_available() and model_type != "resemblyzer"
+    if use_gpu:
+        model = model.cuda(device)
+    model.eval()
+
+    # Get all embeddings
+    speaker_embeddings_test = {}
+    speaker_embeddings_gt = {}
+    speaker_embeddings_pretrained = {}
+    for gen_wav, prompt_wav, _ in tqdm(test_set, desc="Processing embeddings for delta sim evaluation..."):
+        gen_wave_name = Path(gen_wav).stem
+        gen_wav_speaker = gen_wave_name.split("_", 1)[0]
+        speaker_embeddings_test.setdefault(gen_wav_speaker, [])
+
+        wav1, sr1 = torchaudio.load(gen_wav)
+
+        if use_gpu:
+            wav1 = wav1.cuda(device)
+
+        if sr1 != 16000:
+            resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
+            if use_gpu:
+                resample1 = resample1.cuda(device)
+            wav1 = resample1(wav1)
+            sr1 = 16000
+
+        with torch.no_grad():
+            if model_type == "speechbrain_ecapa":
+                wav1_sb = wav1.mean(dim=0)
+                wavs = wav1_sb.unsqueeze(0)
+                embeddings = model.encode_batch(wavs)
+                emb1 = embeddings[0]
+            elif model_type == "resemblyzer":
+                wav1_np = preprocess_wav(gen_wav, source_sr=sr1)
+                emb1 = torch.from_numpy(model.embed_utterance(wav1_np)).unsqueeze(0)
+
+        speaker_embeddings_test[gen_wav_speaker].append(emb1)
+
+        prompt_wave_name = Path(prompt_wav).stem
+        prompt_wav_speaker = prompt_wave_name.split("_", 1)[0]
+        speaker_embeddings_gt.setdefault(prompt_wav_speaker, [])
+
+        if not os.path.exists(os.path.join(embedding_dir_gt, f"emb_{model_type}_{Path(prompt_wav).stem}.pt")):
+            wav2, sr2 = torchaudio.load(prompt_wav)
+
+            if use_gpu:
+                wav2 = wav2.cuda(device)
+
+            if sr2 != 16000:
+                resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
+                if use_gpu:
+                    resample2 = resample2.cuda(device)
+                wav2 = resample2(wav2)
+                sr2 = 16000
+
+            with torch.no_grad():
+                if model_type == "speechbrain_ecapa":
+                    wav2_sb = wav2.mean(dim=0)
+                    wavs = wav2_sb.unsqueeze(0)
+                    embeddings = model.encode_batch(wavs)
+                    emb2 = embeddings[0]
+                elif model_type == "resemblyzer":
+                    wav2_np = preprocess_wav(prompt_wav, source_sr=sr2)
+                    emb2 = torch.from_numpy(model.embed_utterance(wav2_np)).unsqueeze(0)
+
+            torch.save(emb2.cpu(), os.path.join(embedding_dir_gt, f"emb_{model_type}_{Path(prompt_wav).stem}.pt"))
+        else:
+            emb2 = torch.load(os.path.join(embedding_dir_gt, f"emb_{model_type}_{Path(prompt_wav).stem}.pt"))
+            emb2 = emb2.cuda(emb1.device)
+
+        speaker_embeddings_gt[prompt_wav_speaker].append(emb2)
+
+    for gen_wav, _, _ in tqdm(pretrained_test_set, desc="Processing pretrained embeddings for delta sim evaluation..."):
+        gen_wave_name = Path(gen_wav).stem
+        gen_wav_speaker = gen_wave_name.split("_", 1)[0]
+        speaker_embeddings_pretrained.setdefault(gen_wav_speaker, [])
+        if not os.path.exists(os.path.join(embedding_dir_pretrained, f"emb_{model_type}_{Path(gen_wav).stem}.pt")):
+            wav, sr = torchaudio.load(gen_wav)
+
+            if use_gpu:
+                wav = wav.cuda(device)
+
+            if sr != 16000:
+                resample = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                if use_gpu:
+                    resample = resample.cuda(device)
+                wav = resample(wav)
+                sr = 16000
+
+            with torch.no_grad():
+                if model_type == "speechbrain_ecapa":
+                    wav_sb = wav.mean(dim=0)
+                    wavs = wav_sb.unsqueeze(0)
+                    embeddings = model.encode_batch(wavs)
+                    emb = embeddings[0]
+                elif model_type == "resemblyzer":
+                    wav_np = preprocess_wav(gen_wav, source_sr=sr)
+                    emb = torch.from_numpy(model.embed_utterance(wav_np)).unsqueeze(0)
+
+            torch.save(emb.cpu(), os.path.join(embedding_dir_pretrained, f"emb_{model_type}_{Path(gen_wav).stem}.pt"))
+        else:
+            emb = torch.load(os.path.join(embedding_dir_pretrained, f"emb_{model_type}_{Path(gen_wav).stem}.pt"))
+            emb = emb.cuda(emb1.device)
+
+        speaker_embeddings_pretrained[gen_wav_speaker].append(emb)
+
+    avg_speaker_embeddings_test = {}
+    avg_speaker_embeddings_gt = {}
+    avg_speaker_embeddings_pretrained = {}
+
+    for speaker in speaker_embeddings_test:
+        avg_emb_test = torch.mean(torch.stack([emb for emb in speaker_embeddings_test[speaker]]), dim=0)
+        avg_speaker_embeddings_test[speaker] = avg_emb_test
+    del speaker_embeddings_test
+
+    for speaker in speaker_embeddings_gt:
+        avg_emb_gt = torch.mean(torch.stack([emb for emb in speaker_embeddings_gt[speaker]]), dim=0)
+        avg_speaker_embeddings_gt[speaker] = avg_emb_gt
+    del speaker_embeddings_gt
+
+    for speaker in speaker_embeddings_pretrained:
+        avg_emb_pretrained = torch.mean(torch.stack([emb for emb in speaker_embeddings_pretrained[speaker]]), dim=0)
+        avg_speaker_embeddings_pretrained[speaker] = avg_emb_pretrained
+    del speaker_embeddings_pretrained
+
+    delta_sim_results = []
+    for speaker in tqdm(avg_speaker_embeddings_test, desc="Computing delta sim..."):
+        if speaker not in avg_speaker_embeddings_gt or speaker not in avg_speaker_embeddings_pretrained:
+            print(f"Speaker {speaker} not found in GT or pretrained embeddings, skipping...")
+            continue
+
+        emb = avg_speaker_embeddings_test[speaker]
+        emb_gt = avg_speaker_embeddings_gt[speaker]
+        emb_pretrained = avg_speaker_embeddings_pretrained[speaker]
+
+        sim_pretrained_gt = F.cosine_similarity(emb_gt, emb_pretrained)[0].item()
+        sim_unlearned_gt = F.cosine_similarity(emb_gt, emb)[0].item()
+        delta_sim = sim_pretrained_gt - sim_unlearned_gt
+
+        delta_sim_results.append(
+            {
+                "speaker": speaker,
+                "delta_sim": delta_sim,
+                "sim_unlearned_gt_emb_avg": sim_unlearned_gt,
+                "sim_pretrained_gt_emb_avg": sim_pretrained_gt,
+            }
+        )
+
+    return delta_sim_results
 
 
 ######## SPK-ZRF FROM TRUS

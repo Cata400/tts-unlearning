@@ -16,6 +16,7 @@ from omegaconf import OmegaConf
 from f5_tts.eval.utils_eval import (
     get_libritts_test,
     run_asr_wer,
+    run_delta_sim,
     run_diversity,
     run_sim_v2,
     run_spk_ZRF_pipeline_libritts,
@@ -32,7 +33,11 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--seed", default=42, type=int)
     parser.add_argument(
-        "-e", "--eval_task", type=str, default="wer", choices=["sim", "wer", "spk-ZRF", "diversity", "utmosv2"]
+        "-e",
+        "--eval_task",
+        type=str,
+        default="wer",
+        choices=["sim", "wer", "spk-ZRF", "diversity", "utmosv2", "delta_sim"],
     )
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
@@ -58,6 +63,25 @@ def get_args():
     parser.add_argument("--gen_name_tpl", type=str, default="{id}.wav")
     parser.add_argument("--skip_missing_gen", action="store_true")
     parser.add_argument("--batch_size", type=int, default=8)
+    # delta_sim args
+    parser.add_argument(
+        "--embeddings_dir_gt",
+        type=str,
+        default=None,
+        help="Directory containing ground truth embeddings",
+    )
+    parser.add_argument(
+        "--gen_wav_dir_pretrained",
+        type=str,
+        default=None,
+        help="Generated wav dir for the pretrained model",
+    )
+    parser.add_argument(
+        "--embeddings_dir_pretrained",
+        type=str,
+        default=None,
+        help="Directory containing pretrained model embeddings",
+    )
     return parser.parse_args()
 
 
@@ -123,8 +147,30 @@ def main():
     forget_speakers = model_cfg.unlearn.forget_speakers
 
     gpus = parse_gpu_nums(args.gpu_nums)
-    if eval_task in ["sim", "wer", "diversity", "utmosv2"]:
+    if eval_task in ["sim", "wer", "diversity", "utmosv2", "delta_sim"]:
+        print("Loading test set...")
         test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
+    if eval_task == "delta_sim":
+        assert args.embeddings_dir_gt is not None, "embeddings_dir_gt is required for delta_sim evaluation"
+        assert (
+            args.embeddings_dir_pretrained is not None
+        ), "embeddings_dir_pretrained is required for delta_sim evaluation"
+
+        if not os.path.exists(args.embeddings_dir_pretrained):
+            os.makedirs(args.embeddings_dir_pretrained, exist_ok=True)
+
+        if not os.path.exists(args.embeddings_dir_gt):
+            os.makedirs(args.embeddings_dir_gt, exist_ok=True)
+
+        assert (
+            args.gen_wav_dir_pretrained is not None if not os.path.exists(args.embeddings_dir_pretrained) else True
+        ), "gen_wav_dir_pretrained is required if embeddings_dir_pretrained does not exist"
+
+        print("Loading pretrained test set for delta sim evaluation...")
+        pretrained_test_set = get_libritts_test(args.gen_wav_dir_pretrained, gpus, processed_libritts_path)
+        assert len(test_set) == len(
+            pretrained_test_set
+        ), "The number of samples in gen_wav_dir and gen_wav_dir_pretrained must be the same for delta_sim evaluation"
 
     local = args.local
     if local:  # use local custom checkpoint dir
@@ -132,7 +178,7 @@ def main():
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
 
-    if eval_task in ["sim", "spk-ZRF", "diversity"]:
+    if eval_task in ["sim", "spk-ZRF", "diversity", "delta_sim"]:
         if sim_model_type == "wavlm_large_finetune":
             wavlm_ckpt_dir = os.path.join(rel_path, "ckpts", "UniSpeech", "wavlm_large_finetune.pth")
         elif sim_model_type == "wavlm_base_plus_sv":
@@ -161,22 +207,63 @@ def main():
         full_results = run_diversity((test_set[0][0], test_set[0][1], wavlm_ckpt_dir, sim_model_type))
     elif eval_task == "utmosv2":
         full_results = run_utmosv2(test_set[0][1])
+    elif eval_task == "delta_sim":
+        full_results = []
+        speaker_avg_results = run_delta_sim(
+            test_set[0][1],
+            pretrained_test_set[0][1],
+            wavlm_ckpt_dir,
+            sim_model_type,
+            args.embeddings_dir_gt,
+            args.embeddings_dir_pretrained,
+        )
     else:
         raise ValueError(f"Unknown metric type: {eval_task}")
 
-    speaker_avg_results = get_speaker_avg_results(full_results, eval_task)
+    if (
+        eval_task != "delta_sim"
+    ):  # for delta_sim, we will compute speaker_avg_results inside run_delta_sim and directly use it for saving and averaging, since delta_sim is a speaker-level metric
+        speaker_avg_results = get_speaker_avg_results(full_results, eval_task)
+    else:
+        speaker_avg_results.sort(key=lambda x: int(x["speaker"]))
+
     unlearning_avg_results = get_retain_forget_avg_results(speaker_avg_results, eval_task, forget_speakers)
+
+    if eval_task == "delta_sim":
+        full_results = speaker_avg_results
+
     for line in full_results:
         metrics.append(line[eval_task])
     metric = round(np.mean(metrics), 5)
+
     all_results = {
-        "avg_results": metric,
-        "unlearning_avg_results": unlearning_avg_results,
-        "speaker_avg_results": speaker_avg_results,
+        f"avg_{eval_task}_results": metric,
+        f"unlearning_avg_{eval_task}_results": unlearning_avg_results,
+        f"speaker_avg_{eval_task}_results": speaker_avg_results,
         "all_results": full_results,
     }
 
-    result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF', 'diversity'] else ''}.json"
+    if eval_task == "delta_sim":
+        unlearning_avg_results_sim_unlearned_gt_emb_avg = get_retain_forget_avg_results(
+            speaker_avg_results, "sim_unlearned_gt_emb_avg", forget_speakers
+        )
+        unlearning_avg_results_sim_pretrained_gt_emb_avg = get_retain_forget_avg_results(
+            speaker_avg_results, "sim_pretrained_gt_emb_avg", forget_speakers
+        )
+
+        metrics_sim_unlearned_gt_emb_avg = [line["sim_unlearned_gt_emb_avg"] for line in full_results]
+        metric_sim_unlearned_gt_emb_avg = round(np.mean(metrics_sim_unlearned_gt_emb_avg), 5)
+        metrics_sim_pretrained_gt_emb_avg = [line["sim_pretrained_gt_emb_avg"] for line in full_results]
+        metric_sim_pretrained_gt_emb_avg = round(np.mean(metrics_sim_pretrained_gt_emb_avg), 5)
+
+        all_results["avg_results_sim_unlearned_gt_emb_avg"] = metric_sim_unlearned_gt_emb_avg
+        all_results["avg_results_sim_pretrained_gt_emb_avg"] = metric_sim_pretrained_gt_emb_avg
+        all_results["unlearning_avg_results_sim_unlearned_gt_emb_avg"] = unlearning_avg_results_sim_unlearned_gt_emb_avg
+        all_results["unlearning_avg_results_sim_pretrained_gt_emb_avg"] = (
+            unlearning_avg_results_sim_pretrained_gt_emb_avg
+        )
+
+    result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF', 'diversity', 'delta_sim'] else ''}.json"
     with open(result_path, "w") as f:
         json.dump(all_results, f, indent=4)
 

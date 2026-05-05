@@ -149,13 +149,13 @@ echo "Evaluating SIM"
 python3 ./eval/eval_libritts.py --eval_task sim --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE
 echo "Evaluating SIM_GT_MATCHING"
 python3 ./eval/eval_libritts.py --eval_task sim_gt_matching --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE
+echo "Evaluating DELTA_SIM"
+python3 ./eval/eval_libritts.py --eval_task delta_sim --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE --gen_wav_dir_pretrained $GEN_WAV_DIR_PRETRAINED --embeddings_dir_gt $EMBEDDINGS_DIR_GT --embeddings_dir_pretrained $EMBEDDINGS_DIR_PRETRAINED
 echo "Evaluating WER"
 python3 ./eval/eval_libritts.py --eval_task wer --config_name $CONFIG_NAME  --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
+echo "Evaluating UTMOSv2"
+python3 ./eval/eval_libritts.py --eval_task utmosv2 --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
 echo "Evaluating spk-ZRF"
 python3 ./eval/eval_libritts.py --eval_task spk-ZRF --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --gen_wav_dir_pretrained_unconditional $GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL --sim_model_type $SIM_MODEL_TYPE
 echo "Evaluating DIVERSITY"
 python3 ./eval/eval_libritts.py --eval_task diversity --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE
-echo "Evaluating UTMOSv2"
-python3 ./eval/eval_libritts.py --eval_task utmosv2 --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH
-echo "Evaluating DELTA_SIM"
-python3 ./eval/eval_libritts.py --eval_task delta_sim --config_name $CONFIG_NAME --gen_wav_dir $GEN_WAV_DIR --processed_libritts_path $PROCESSED_LIBRITTS_PATH --sim_model_type $SIM_MODEL_TYPE --gen_wav_dir_pretrained $GEN_WAV_DIR_PRETRAINED --embeddings_dir_gt $EMBEDDINGS_DIR_GT --embeddings_dir_pretrained $EMBEDDINGS_DIR_PRETRAINED

@@ -29,7 +29,7 @@ PROCESSED_LIBRITTS_PATH=/home/catalin/Desktop/Datasets/LibriTTS/train-clean-100_
 CONFIG_NAME=F5TTS_v1_Base_unlearn
 GEN_WAV_DIR_PRETRAINED_UNCONDITIONAL=/home/catalin/Desktop/Projects/tts-unlearning/results/pretrained_unconditional/
 SIM_MODEL_TYPE=speechbrain_ecapa
-GEN_WAV_DIR_PRETRAINED=/home/catalin/Desktop/Projects/tts-unlearning/results/F5TTS_v1_Base_unlearn_last/train-clean-100_val_intra_speaker_split_0.2/server_experiments/F5TTS_v1_Base_last/train-clean-100_val_intra_speaker_split_0.2/seed42_euler_nfe32_vocos_ss-1_cfg2.0_speed1.0
+GEN_WAV_DIR_PRETRAINED=/home/catalin/Desktop/Projects/tts-unlearning/results/F5TTS_v1_Base_unlearn_last/train-clean-100_val_intra_speaker_split_0.2/server_experiments/pretrained/train-clean-100_val_intra_speaker_split_0.2/seed42_euler_nfe32_vocos_ss-1_cfg2.0_speed1.0
 EMBEDDINGS_DIR_GT=/home/catalin/Desktop/Projects/tts-unlearning/results/embeddings_speechbrain_ecapa_train-clean-100_val_intra_speaker_split_0.2_gt
 EMBEDDINGS_DIR_PRETRAINED=/home/catalin/Desktop/Projects/tts-unlearning/results/embeddings_speechbrain_ecapa_train-clean-100_val_intra_speaker_split_0.2_pretrained
 

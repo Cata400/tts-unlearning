@@ -170,7 +170,7 @@ def main():
         elif os.path.exists(ckpt_prefix + ".safetensors"):
             ckpt_path = ckpt_prefix + ".safetensors"
         else:
-            raise ValueError("The checkpoint does not exist or cannot be found in given location.")
+            raise ValueError(f"The checkpoint {ckpt_prefix} does not exist or cannot be found in given location.")
 
     print(f"Loading model checkpoint from {ckpt_path}")
     dtype = torch.float32 if mel_spec_type == "bigvgan" else None

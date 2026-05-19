@@ -14,10 +14,10 @@
 ###   --gen_wav_dir DIR
 ###   --processed_libritts_path PATH
 ###   --config_name NAME
-###   --gen_wav_dir_pretrained_unconditional DIR
-###   --gen_wav_dir_pretrained DIR
-###   --embeddings_dir_gt DIR
-###   --embeddings_dir_pretrained DIR
+###   --gen_wav_dir_pretrained_unconditional DIR (spk-ZRF)
+###   --gen_wav_dir_pretrained DIR (delta_sim)
+###   --embeddings_dir_gt DIR (delta_sim)
+###   --embeddings_dir_pretrained DIR (delta_sim)
 ###   --sim_model_type TYPE
 ### Positional args (backwards compatible):
 ###   $1: gen_wav_dir

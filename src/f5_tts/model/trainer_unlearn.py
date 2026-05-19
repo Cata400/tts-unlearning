@@ -227,18 +227,21 @@ class TrainerUnlearn:  # TODO add info logger
             return 0
 
         self.accelerator.wait_for_everyone()
-        if "model_last.pt" in os.listdir(self.checkpoint_path):
-            latest_checkpoint = "model_last.pt"
+        if "unlearned_model_last.pt" in os.listdir(self.checkpoint_path):
+            latest_checkpoint = "unlearned_model_last.pt"
         else:
             # Updated to consider pretrained models for loading but prioritize training checkpoints
             all_checkpoints = [
                 f
                 for f in os.listdir(self.checkpoint_path)
-                if (f.startswith("model_") or f.startswith("pretrained_")) and f.endswith((".pt", ".safetensors"))
+                if (f.startswith("unlearned_model_") or f.startswith("pretrained_"))
+                and f.endswith((".pt", ".safetensors"))
             ]
 
             # First try to find regular training checkpoints
-            training_checkpoints = [f for f in all_checkpoints if f.startswith("model_") and f != "model_last.pt"]
+            training_checkpoints = [
+                f for f in all_checkpoints if f.startswith("unlearned_model_") and f != "unlearned_model_last.pt"
+            ]
             if training_checkpoints:
                 latest_checkpoint = sorted(
                     training_checkpoints,
@@ -511,7 +514,6 @@ class TrainerUnlearn:  # TODO add info logger
         self.load_pretrained_checkpoint(self.teacher)
         print("Load student")
         self.load_pretrained_checkpoint(self.model)
-        print(self.checkpoint_path, os.listdir(self.checkpoint_path))
         start_update = self.load_checkpoint()
         global_update = start_update
 
@@ -728,7 +730,6 @@ class TrainerUnlearn:  # TODO add info logger
         self.load_pretrained_checkpoint(self.teacher)
         print("Load student")
         self.load_pretrained_checkpoint(self.model)
-        print(self.checkpoint_path, os.listdir(self.checkpoint_path))
         start_update = self.load_checkpoint()
         global_update = start_update
 

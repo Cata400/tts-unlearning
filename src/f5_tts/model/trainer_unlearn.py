@@ -427,6 +427,7 @@ class TrainerUnlearn:  # TODO add info logger
                 batch_size=self.batch_size_per_gpu,
                 random_seed=resumable_with_seed,
                 oversample_forget=self.unlearn_params.get("balanced_unlearn_sample_oversample_forget", False),
+                retain_duration_budget_ratio=self.unlearn_params.get("retain_duration_budget_ratio"),
             )
             train_dataloader = DataLoader(
                 train_dataset,

@@ -283,6 +283,44 @@ def get_dataset_num_speakers(dataset):
     return len(speaker_ids)
 
 
+def limit_indices_by_total_frames(
+    dataset: Dataset,
+    indices: list[int],
+    max_total_frames: float,
+    random_seed: int | None = None,
+) -> list[int]:
+    if max_total_frames <= 0:
+        raise ValueError(f"max_total_frames must be positive, but received {max_total_frames}")
+
+    if not hasattr(dataset, "get_frame_len"):
+        raise ValueError("Duration-based retain limiting requires the dataset to implement `get_frame_len`.")
+
+    if len(indices) == 0:
+        return []
+
+    generator = torch.Generator()
+    if random_seed is not None:
+        generator.manual_seed(random_seed)
+        shuffled_positions = torch.randperm(len(indices), generator=generator).tolist()
+    else:
+        shuffled_positions = torch.randperm(len(indices)).tolist()
+
+    limited_indices = []
+    total_frames = 0.0
+    for pos in shuffled_positions:
+        idx = indices[pos]
+        frame_len = dataset.get_frame_len(idx)
+
+        if total_frames + frame_len <= max_total_frames or len(limited_indices) == 0:
+            limited_indices.append(idx)
+            total_frames += frame_len
+
+    if len(limited_indices) == 0:
+        raise ValueError("Duration-based retain limiting removed all retain samples.")
+
+    return limited_indices
+
+
 class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
     """Batch sampler with a fixed 50/50 retain/forget composition per batch.
 
@@ -292,12 +330,24 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
     """
 
     def __init__(
-        self, dataset: Dataset, batch_size: int, random_seed: int | None = None, oversample_forget: bool = False
+        self,
+        dataset: Dataset,
+        batch_size: int,
+        random_seed: int | None = None,
+        oversample_forget: bool = False,
+        retain_duration_budget_ratio: float | None = None,
     ):
         if batch_size % 2 != 0:
             raise ValueError(f"balanced_unlearn_sample requires an even batch_size_per_gpu, but received {batch_size}")
         if not hasattr(dataset, "data") or not hasattr(dataset, "forget_speakers"):
             raise ValueError("balanced_unlearn_sample requires a dataset with `data` and `forget_speakers` attributes.")
+        if retain_duration_budget_ratio is not None and retain_duration_budget_ratio <= 0:
+            raise ValueError(
+                "retain_duration_budget_ratio must be positive when provided, "
+                f"but received {retain_duration_budget_ratio}"
+            )
+        if retain_duration_budget_ratio is not None and oversample_forget:
+            raise ValueError("retain_duration_budget_ratio is not compatible with oversample_forget=True")
 
         forget_speakers = set(dataset.forget_speakers)
         self.oversample_forget = oversample_forget
@@ -314,6 +364,16 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
             raise ValueError("balanced_unlearn_sample requires at least one forget sample.")
         if len(self.retain_indices) == 0:
             raise ValueError("balanced_unlearn_sample requires at least one retain sample.")
+
+        if retain_duration_budget_ratio is not None:
+            forget_total_frames = sum(dataset.get_frame_len(idx) for idx in self.forget_indices)
+            retain_total_frame_budget = forget_total_frames * retain_duration_budget_ratio
+            self.retain_indices = limit_indices_by_total_frames(
+                dataset,
+                self.retain_indices,
+                max_total_frames=retain_total_frame_budget,
+                random_seed=random_seed,
+            )
 
         self.half_batch_size = batch_size // 2
         self.random_seed = random_seed

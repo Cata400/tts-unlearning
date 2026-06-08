@@ -428,6 +428,10 @@ class TrainerUnlearn:  # TODO add info logger
                 random_seed=resumable_with_seed,
                 oversample_forget=self.unlearn_params.get("balanced_unlearn_sample_oversample_forget", False),
                 retain_duration_budget_ratio=self.unlearn_params.get("retain_duration_budget_ratio"),
+                retain_duration_budget_reset_per_epoch=self.unlearn_params.get(
+                    "retain_duration_budget_reset_per_epoch", False
+                ),
+                forget_duration_budget_ratio=self.unlearn_params.get("forget_duration_budget_ratio", None),
             )
             train_dataloader = DataLoader(
                 train_dataset,

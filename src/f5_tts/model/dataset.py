@@ -336,6 +336,8 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
         random_seed: int | None = None,
         oversample_forget: bool = False,
         retain_duration_budget_ratio: float | None = None,
+        retain_duration_budget_reset_per_epoch: bool = False,
+        forget_duration_budget_ratio: float | None = None,
     ):
         if batch_size % 2 != 0:
             raise ValueError(f"balanced_unlearn_sample requires an even batch_size_per_gpu, but received {batch_size}")
@@ -349,6 +351,13 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
         if retain_duration_budget_ratio is not None and oversample_forget:
             raise ValueError("retain_duration_budget_ratio is not compatible with oversample_forget=True")
 
+        if forget_duration_budget_ratio is not None and forget_duration_budget_ratio <= 0:
+            raise ValueError(
+                "forget_duration_budget_ratio must be positive when provided, "
+                f"but received {forget_duration_budget_ratio}"
+            )
+
+        self.dataset = dataset
         forget_speakers = set(dataset.forget_speakers)
         self.oversample_forget = oversample_forget
         self.forget_indices = []
@@ -359,6 +368,11 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
                 self.forget_indices.append(idx)
             else:
                 self.retain_indices.append(idx)
+        self.initial_retain_indices = self.retain_indices.copy()
+        self.initial_forget_indices = self.forget_indices.copy()
+        self.retain_duration_budget_ratio = retain_duration_budget_ratio
+        self.retain_duration_budget_reset_per_epoch = retain_duration_budget_reset_per_epoch
+        self.forget_duration_budget_ratio = forget_duration_budget_ratio
 
         if len(self.forget_indices) == 0:
             raise ValueError("balanced_unlearn_sample requires at least one forget sample.")
@@ -366,12 +380,14 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
             raise ValueError("balanced_unlearn_sample requires at least one retain sample.")
 
         if retain_duration_budget_ratio is not None:
-            forget_total_frames = sum(dataset.get_frame_len(idx) for idx in self.forget_indices)
-            retain_total_frame_budget = forget_total_frames * retain_duration_budget_ratio
-            self.retain_indices = limit_indices_by_total_frames(
-                dataset,
-                self.retain_indices,
-                max_total_frames=retain_total_frame_budget,
+            self._reset_retain_indices(random_seed=random_seed)
+
+        if forget_duration_budget_ratio is not None:
+            self.forget_indices = limit_indices_by_total_frames(
+                self.dataset,
+                self.forget_indices,
+                max_total_frames=sum(self.dataset.get_frame_len(idx) for idx in self.initial_forget_indices)
+                * forget_duration_budget_ratio,
                 random_seed=random_seed,
             )
 
@@ -379,8 +395,32 @@ class BalancedUnlearningSampleBatchSampler(Sampler[list[int]]):
         self.random_seed = random_seed
         self.epoch = 0
 
+    def _reset_retain_indices(self, random_seed: int | None = None):
+        self.retain_indices = self.initial_retain_indices.copy()
+
+        if self.retain_duration_budget_ratio is None:
+            return
+
+        forget_total_frames = sum(self.dataset.get_frame_len(idx) for idx in self.initial_forget_indices)
+        retain_total_frame_budget = forget_total_frames * self.retain_duration_budget_ratio
+        self.retain_indices = limit_indices_by_total_frames(
+            self.dataset,
+            self.retain_indices,
+            max_total_frames=retain_total_frame_budget,
+            random_seed=random_seed,
+        )
+
     def set_epoch(self, epoch: int):
         self.epoch = epoch
+
+        if self.retain_duration_budget_reset_per_epoch and self.retain_duration_budget_ratio is not None:
+            epoch_seed = None if self.random_seed is None else self.random_seed + epoch
+            self._reset_retain_indices(random_seed=epoch_seed)
+
+            retries = 1
+            while len(self.retain_indices) < len(self.forget_indices):
+                self._reset_retain_indices(random_seed=epoch_seed + retries)
+                retries += 1
 
     def __iter__(self):
         if self.oversample_forget:
@@ -610,22 +650,22 @@ class DynamicUnlearningBatchSampler(Sampler[list[int]]):
             if len(batch) > 0:
                 forget_batches.append(batch)
 
-        # # Build remaining retain-only batches
-        # batch = []
-        # batch_frames = 0
-        # for idx, frame_len in retain_indices[retain_pos:]:
-        #     if batch_frames + frame_len <= self.frames_threshold and (max_samples == 0 or len(batch) < max_samples):
-        #         batch.append(idx)
-        #         batch_frames += frame_len
-        #     else:
-        #         if len(batch) > 0:
-        #             retain_batches.append(batch)
-        #         if frame_len <= self.frames_threshold:
-        #             batch = [idx]
-        #             batch_frames = frame_len
-        #         else:
-        #             batch = []
-        #             batch_frames = 0
+        # Build remaining retain-only batches
+        batch = []
+        batch_frames = 0
+        for idx, frame_len in retain_indices[retain_pos:]:
+            if batch_frames + frame_len <= self.frames_threshold and (max_samples == 0 or len(batch) < max_samples):
+                batch.append(idx)
+                batch_frames += frame_len
+            else:
+                if len(batch) > 0:
+                    retain_batches.append(batch)
+                if frame_len <= self.frames_threshold:
+                    batch = [idx]
+                    batch_frames = frame_len
+                else:
+                    batch = []
+                    batch_frames = 0
 
         if not drop_residual and len(batch) > 0:
             retain_batches.append(batch)

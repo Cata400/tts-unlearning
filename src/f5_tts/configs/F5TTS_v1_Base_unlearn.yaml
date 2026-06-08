@@ -4,8 +4,8 @@ datasets:
   batch_size_per_gpu: 2 # 2048
   batch_size_type: balanced_unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
   ## TGU
-  # batch_size_per_gpu: 4
-  # batch_size_type: unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
+  # batch_size_per_gpu: 2048 # 4
+  # batch_size_type: frame # unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
   max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
   num_workers: 16
 
@@ -71,13 +71,15 @@ unlearn:
   # forget_speakers: [196, 26, 40, 78, 87, 200, 250, 254, 374, 405]
   unlearn_methods:
     TGU:
-      use: false
+      use: False
       lambda: 0.2 # retain weight, 1 - lambda is forget weight
     SGU:
-      use: true
+      use: True
       forget_ratio: 0.2 # probability of optimizing for forget
-      balanced_unlearn_sample_oversample_forget: true # whether to oversample forget samples for balanced_unlearn_sample batch type
+      balanced_unlearn_sample_oversample_forget: false # whether to oversample forget samples for balanced_unlearn_sample batch type
       retain_duration_budget_ratio: 1.0 # cap retain pool to ~forget pool total duration
+      retain_duration_budget_reset_per_epoch: False # whether to reset retain duration budget at the beginning of each epoch
+      forget_duration_budget_ratio: 0.1 # cap forget pool
 
 hydra:
   run:

@@ -38,7 +38,9 @@ def main(model_cfg):
             unlearn_method = method
             break
 
-    finetune_methods_use = [params.use for _, params in model_cfg.model.finetune.items()]
+    finetune_methods_use = [
+        params.use for method, params in model_cfg.model.finetune.items() if method != "svdiff"
+    ]  # allow svdiff to be used with finetuning methods
     assert sum(finetune_methods_use) <= 1, "Multiple finetune methods cannot be used at the same time"
 
     if sum(finetune_methods_use) == 0:

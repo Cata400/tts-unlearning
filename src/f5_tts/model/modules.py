@@ -808,3 +808,20 @@ class TimestepEmbedding(nn.Module):
         time_hidden = time_hidden.to(timestep.dtype)
         time = self.time_mlp(time_hidden)  # b d
         return time
+
+
+class SVDParametrization(nn.Module):
+    def __init__(self, weight: torch.Tensor):
+        super().__init__()
+
+        with torch.no_grad():
+            U, S, Vh = torch.linalg.svd(weight, full_matrices=False)
+
+        self.register_buffer("U", U)
+        self.register_buffer("Vh", Vh)
+        self.register_buffer("S", S)  # frozen, like U and Vh
+
+        self.delta_S = nn.Parameter(torch.zeros_like(S))
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        return self.U @ torch.diag(self.S + self.delta_S) @ self.Vh

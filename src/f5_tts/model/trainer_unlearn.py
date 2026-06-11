@@ -5,6 +5,7 @@ import math
 import os
 
 import torch
+import torch.nn.utils.parametrize as parametrize
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from ema_pytorch import EMA
@@ -33,6 +34,7 @@ from f5_tts.model.dataset import (
     collate_fn_unlearning,
     get_dataset_num_speakers,
 )
+from f5_tts.model.modules import SVDParametrization
 from f5_tts.model.utils import default, exists
 
 
@@ -122,9 +124,10 @@ class TrainerUnlearn:  # TODO add info logger
 
         self.model = model
         self.teacher = teacher
+        self.ema_kwargs = ema_kwargs
 
         if self.is_main:
-            self.ema_model = EMA(model, include_online_model=False, **ema_kwargs)
+            self.ema_model = EMA(self.model, include_online_model=False, **self.ema_kwargs)
             self.ema_model.to(self.accelerator.device)
 
             print(f"Using logger: {logger}")
@@ -134,6 +137,7 @@ class TrainerUnlearn:  # TODO add info logger
                 )
 
         self.epochs = epochs
+        self.learning_rate = learning_rate
         self.num_warmup_updates = num_warmup_updates
         self.save_per_updates = save_per_updates
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
@@ -155,6 +159,7 @@ class TrainerUnlearn:  # TODO add info logger
         self.noise_scheduler = noise_scheduler
 
         self.duration_predictor = duration_predictor
+        self.bnb_optimizer = bnb_optimizer
 
         if bnb_optimizer:
             import bitsandbytes as bnb
@@ -181,6 +186,41 @@ class TrainerUnlearn:  # TODO add info logger
     @staticmethod
     def _weight_stat_metric_prefix(name: str) -> str:
         return f"weight_stats/{name.replace('.', '/')}"
+
+    def _get_lr_schedule_updates(self, train_dataloader: DataLoader):
+        # accelerator.prepare() dispatches batches to devices;
+        # which means the length of dataloader calculated before, should consider the number of devices
+        warmup_updates = (
+            self.num_warmup_updates * self.accelerator.num_processes
+        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
+        # otherwise by default with split_batches=False, warmup steps change with num_processes
+        total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
+        decay_updates = total_updates - warmup_updates
+        return warmup_updates, decay_updates
+
+    def _build_lr_scheduler(self, warmup_updates: int, decay_updates: int):
+        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
+        decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
+        return SequentialLR(self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates])
+
+    def reset_optimizer_and_scheduler_after_svdiff(self, warmup_updates: int, decay_updates: int):
+        trainable_params = [p for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad]
+        if not trainable_params:
+            raise ValueError("SVDiff reset found no trainable parameters for the optimizer.")
+
+        if self.bnb_optimizer:
+            import bitsandbytes as bnb
+
+            self.optimizer = bnb.optim.AdamW8bit(trainable_params, lr=self.learning_rate)
+        else:
+            self.optimizer = AdamW(trainable_params, lr=self.learning_rate)
+
+        if self.is_main:
+            self.ema_model = EMA(self.model, include_online_model=False, **self.ema_kwargs)
+            self.ema_model.to(self.accelerator.device)
+
+        self.scheduler = self._build_lr_scheduler(warmup_updates, decay_updates)
+        self.optimizer, self.scheduler = self.accelerator.prepare(self.optimizer, self.scheduler)
 
     def save_checkpoint(self, update, last=False):
         self.accelerator.wait_for_everyone()
@@ -501,17 +541,8 @@ class TrainerUnlearn:  # TODO add info logger
 
         #  accelerator.prepare() dispatches batches to devices;
         #  which means the length of dataloader calculated before, should consider the number of devices
-        warmup_updates = (
-            self.num_warmup_updates * self.accelerator.num_processes
-        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
-        # otherwise by default with split_batches=False, warmup steps change with num_processes
-        total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
-        decay_updates = total_updates - warmup_updates
-        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
-        decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
-        self.scheduler = SequentialLR(
-            self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
-        )
+        warmup_updates, decay_updates = self._get_lr_schedule_updates(train_dataloader)
+        self.scheduler = self._build_lr_scheduler(warmup_updates, decay_updates)
         train_dataloader, self.scheduler = self.accelerator.prepare(
             train_dataloader, self.scheduler
         )  # actual multi_gpu updates = single_gpu updates / gpu nums
@@ -526,6 +557,10 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_diffit()
         elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
             self.prepare_model_for_dit_blocks_mlp()
+
+        if self.model_cfg_dict["model"].get("finetune", {}).get("svdiff", {}).get("use", False):
+            self.prepare_model_for_svdiff()
+            self.reset_optimizer_and_scheduler_after_svdiff(warmup_updates, decay_updates)
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -717,17 +752,8 @@ class TrainerUnlearn:  # TODO add info logger
 
         #  accelerator.prepare() dispatches batches to devices;
         #  which means the length of dataloader calculated before, should consider the number of devices
-        warmup_updates = (
-            self.num_warmup_updates * self.accelerator.num_processes
-        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
-        # otherwise by default with split_batches=False, warmup steps change with num_processes
-        total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
-        decay_updates = total_updates - warmup_updates
-        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
-        decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
-        self.scheduler = SequentialLR(
-            self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
-        )
+        warmup_updates, decay_updates = self._get_lr_schedule_updates(train_dataloader)
+        self.scheduler = self._build_lr_scheduler(warmup_updates, decay_updates)
         train_dataloader, self.scheduler = self.accelerator.prepare(
             train_dataloader, self.scheduler
         )  # actual multi_gpu updates = single_gpu updates / gpu nums
@@ -742,6 +768,10 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_diffit()
         elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
             self.prepare_model_for_dit_blocks_mlp()
+
+        if self.model_cfg_dict["model"].get("finetune", {}).get("svdiff", {}).get("use", False):
+            self.prepare_model_for_svdiff()
+            self.reset_optimizer_and_scheduler_after_svdiff(warmup_updates, decay_updates)
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -1102,6 +1132,36 @@ class TrainerUnlearn:  # TODO add info logger
             )
 
         print("Trainable parameters for DIT blocks MLP:")
+        trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
+        for name in trainable_names:
+            print(f"  - {name}")
+
+        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
+            p.requires_grad = False
+
+        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
+            if n in trainable_names:
+                p.requires_grad = True
+
+    def prepare_model_for_svdiff(self):
+        module_params_dict = {
+            module: list(module.named_parameters(recurse=False))
+            for name, module in self.accelerator.unwrap_model(self.model).named_modules()
+        }
+        for name, module in self.accelerator.unwrap_model(self.model).named_modules():
+            if module not in module_params_dict:
+                continue
+            for param_name, param in module_params_dict[module]:
+                if param.requires_grad:
+                    full_param_name = f"{name}.{param_name}" if name else param_name
+                    if "weight" in full_param_name:
+                        parametrize.register_parametrization(module, param_name, SVDParametrization(param))
+
+        trainable_names = [
+            name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "delta_S" in name
+        ]
+
+        print("Trainable parameters for SVDiff:")
         trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
         for name in trainable_names:
             print(f"  - {name}")

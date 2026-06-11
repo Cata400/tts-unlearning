@@ -4,7 +4,6 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
 sys.path.append(f"{os.path.dirname(os.path.abspath(__file__))}/../../third_party/BigVGAN/")
 
@@ -15,12 +14,12 @@ from importlib.resources import files
 
 import matplotlib
 
-
 matplotlib.use("Agg")
 
 import matplotlib.pylab as plt
 import numpy as np
 import torch
+import torch.nn.utils.parametrize as parametrize
 import torchaudio
 import tqdm
 from huggingface_hub import hf_hub_download
@@ -29,8 +28,8 @@ from transformers import pipeline
 from vocos import Vocos
 
 from f5_tts.model import CFM
+from f5_tts.model.modules import SVDParametrization
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
-
 
 _ref_audio_cache = {}
 _ref_text_cache = {}
@@ -38,11 +37,7 @@ _ref_text_cache = {}
 device = (
     "cuda"
     if torch.cuda.is_available()
-    else "xpu"
-    if torch.xpu.is_available()
-    else "mps"
-    if torch.backends.mps.is_available()
-    else "cpu"
+    else "xpu" if torch.xpu.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 )
 
 tempfile_kwargs = {"delete_on_close": False} if sys.version_info >= (3, 12) else {"delete": False}
@@ -185,17 +180,7 @@ def transcribe(ref_audio, language=None):
 # load model checkpoint for inference
 
 
-def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True):
-    if dtype is None:
-        dtype = (
-            torch.float16
-            if "cuda" in device
-            and torch.cuda.get_device_properties(device).major >= 7
-            and not torch.cuda.get_device_name().endswith("[ZLUDA]")
-            else torch.float32
-        )
-    model = model.to(dtype)
-
+def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svdiff=False):
     ckpt_type = ckpt_path.split(".")[-1]
     if ckpt_type == "safetensors":
         from safetensors.torch import load_file
@@ -217,17 +202,40 @@ def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True):
         for key in ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]:
             if key in checkpoint["model_state_dict"]:
                 del checkpoint["model_state_dict"][key]
-
-        model.load_state_dict(checkpoint["model_state_dict"])
     else:
         if ckpt_type == "safetensors":
             checkpoint = {"model_state_dict": checkpoint}
-        model.load_state_dict(checkpoint["model_state_dict"])
+
+    if svdiff:
+        model = prepare_model_for_svdiff(model, checkpoint["model_state_dict"])
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    if dtype is None:
+        dtype = (
+            torch.float16
+            if "cuda" in device
+            and torch.cuda.get_device_properties(device).major >= 7
+            and not torch.cuda.get_device_name().endswith("[ZLUDA]")
+            else torch.float32
+        )
+    model = model.to(dtype)
 
     del checkpoint
     torch.cuda.empty_cache()
 
     return model.to(device)
+
+
+def prepare_model_for_svdiff(model, checkpoint):
+    svdiff_parametrize_keys = [k for k in checkpoint.keys() if "parametrizations" in k and "delta_S" in k]
+    svdiff_module_names = sorted(set([k.split(".parametrizations.")[0] for k in svdiff_parametrize_keys]))
+
+    for name, module in model.named_modules():
+        if name not in svdiff_module_names:
+            continue
+        parametrize.register_parametrization(module, "weight", SVDParametrization(module.weight))
+
+    return model
 
 
 # load model for inference

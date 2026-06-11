@@ -16,6 +16,7 @@
 ###   --processed_libritts_dataset_path PATH
 ###   --seed SEED
 ###   --n_gpus N
+###   --svdiff
 ### Positional args (backwards compatible):
 ###   $1: expname
 ###   $2: ckptstep (default: last)
@@ -25,7 +26,7 @@
 #################################
 
 usage() {
-    echo "Usage: $0 --expname NAME [--ckptstep STEP] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N]"
+    echo "Usage: $0 --expname NAME [--ckptstep STEP] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N] [--svdiff]"
     echo "       $0 EXP_NAME [CKPTSTEP] [PROCESSED_PATH] [SEED] [N_GPUS]"
 }
 
@@ -34,6 +35,7 @@ CKPTSTEP=last
 PROCESSED_LIBRITTS_DATASET_PATH=/alpha/catalin.ciocirlan/Datasets/LibriTTS/train-clean-100_val_intra_speaker_split_0.2/
 SEED=42
 N_GPUS=1
+SVDIFF=0
 
 POSITIONAL=()
 while [ $# -gt 0 ]; do
@@ -57,6 +59,10 @@ while [ $# -gt 0 ]; do
         --n_gpus|--ngpus)
             N_GPUS="$2"
             shift 2
+            ;;
+        --svdiff)
+            SVDIFF=1
+            shift
             ;;
         -h|--help)
             usage
@@ -105,6 +111,7 @@ echo "CKPTSTEP: $CKPTSTEP"
 echo "PROCESSED_LIBRITTS_DATASET_PATH: $PROCESSED_LIBRITTS_DATASET_PATH"
 echo "SEED: $SEED"
 echo "N_GPUS: $N_GPUS"
+echo "SVDIFF: $SVDIFF"
 
 
 source /etc/profile.d/modules.sh
@@ -112,9 +119,14 @@ module load anaconda/3
 module load cuda/12.6-9.5
 conda activate f5-tts
 
+SVDIFF_ARGS=()
+if [ "$SVDIFF" -eq 1 ]; then
+    SVDIFF_ARGS=(--svdiff)
+fi
+
 if [ "$N_GPUS" -gt 1 ]
 then
-    accelerate launch ./eval/eval_libritts_infer_batch.py --expname $EXPNAME --ckptstep $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH --seed $SEED
+    accelerate launch ./eval/eval_libritts_infer_batch.py --expname $EXPNAME --ckptstep $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH --seed $SEED "${SVDIFF_ARGS[@]}"
 else
-    python3 ./eval/eval_libritts_infer_batch.py --expname $EXPNAME --ckptstep $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH --seed $SEED
+    python3 ./eval/eval_libritts_infer_batch.py --expname $EXPNAME --ckptstep $CKPTSTEP --processed_libritts_dataset_path $PROCESSED_LIBRITTS_DATASET_PATH --seed $SEED "${SVDIFF_ARGS[@]}"
 fi

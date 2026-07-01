@@ -182,10 +182,252 @@ class TrainerUnlearn:  # TODO add info logger
         wandb.define_metric("lr", step_metric="train_step")
         wandb.define_metric("weight_stats_step")
         wandb.define_metric("weight_stats/*", step_metric="weight_stats_step")
+        wandb.define_metric("svdiff_u_pre_grad_step")
+        wandb.define_metric("svdiff_u_pre_grad/*", step_metric="svdiff_u_pre_grad_step")
 
     @staticmethod
     def _weight_stat_metric_prefix(name: str) -> str:
         return f"weight_stats/{name.replace('.', '/')}"
+
+    @staticmethod
+    def _svdiff_u_pre_grad_metric_prefix(index: int) -> str:
+        return f"svdiff_u_pre_grad/delta_u_{index:03d}"
+
+    def _get_svdiff_u_singular_values_by_param_name(self) -> dict[str, torch.Tensor]:
+        singular_values_by_param: dict[str, torch.Tensor] = {}
+        for module_name, module in self.accelerator.unwrap_model(self.model).named_modules():
+            if not hasattr(module, "parametrizations") or "weight" not in module.parametrizations:
+                continue
+
+            parametrizations = module.parametrizations["weight"]
+            if len(parametrizations) == 0:
+                continue
+            parametrization = parametrizations[0]
+            if not (hasattr(parametrization, "delta_U") and hasattr(parametrization, "S")):
+                continue
+
+            param_name = (
+                f"{module_name}.parametrizations.weight.0.delta_U"
+                if module_name
+                else "parametrizations.weight.0.delta_U"
+            )
+            singular_values_by_param[param_name] = parametrization.S.detach().to(device="cpu", dtype=torch.float64)
+
+        return singular_values_by_param
+
+    def _run_svdiff_u_pre_grad_logging(
+        self,
+        train_dataset: Dataset,
+        num_workers: int,
+        resumable_with_seed: int | None,
+        unlearn_method: str,
+    ):
+        if self._get_svdiff_variant() != "svdiff_u":
+            return
+
+        svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
+        pre_grad_enabled = svdiff_u_cfg.get("pre_grad_enabled", False)
+        pre_grad_steps = int(svdiff_u_cfg.get("pre_grad_steps", 0))
+
+        if not pre_grad_enabled or pre_grad_steps <= 0:
+            return
+
+        print(f"Running SVDiff-U pre-grad logging for {pre_grad_steps} steps (method={unlearn_method})")
+
+        pre_dataloader = self.create_dataloader(
+            train_dataset, num_workers=num_workers, resumable_with_seed=resumable_with_seed
+        )
+        pre_dataloader = self.accelerator.prepare(pre_dataloader)
+
+        was_training = self.model.training
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+        grad_abs_sums: dict[str, torch.Tensor] = {}
+        effective_steps = 0
+
+        try:
+            self.model.train()
+            self.optimizer.zero_grad(set_to_none=True)
+            pre_iter = iter(pre_dataloader)
+
+            for _ in range(pre_grad_steps):
+                try:
+                    batch = next(pre_iter)
+                except StopIteration:
+                    break
+
+                if unlearn_method == "TGU":
+                    text_inputs_retain = batch["text_retain"]
+                    text_inputs_forget = batch["text_forget"]
+                    mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
+                    mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
+                    mel_lengths_retain = batch["mel_lengths_retain"]
+                    mel_lengths_forget = batch["mel_lengths_forget"]
+
+                    if mel_spec_retain.numel() > 0:
+                        retain_loss, _, _ = self.model.forward_unlearn(
+                            mel_spec_retain,
+                            text=text_inputs_retain,
+                            lens=mel_lengths_retain,
+                            noise_scheduler=self.noise_scheduler,
+                            forget=False,
+                        )
+                    else:
+                        retain_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+                    if mel_spec_forget.numel() > 0:
+                        infer_texts_forget = [
+                            text_inputs_forget[i]
+                            + ([" "] if isinstance(text_inputs_forget[i], list) else " ")
+                            + text_inputs_forget[i]
+                            for i in range(len(text_inputs_forget))
+                        ]
+                        with torch.inference_mode():
+                            unconditioned_mel_spec_forget, _ = self.accelerator.unwrap_model(self.teacher).sample(
+                                cond=torch.zeros_like(mel_spec_forget),
+                                text=infer_texts_forget,
+                                duration=mel_spec_forget.size(1) * 2,
+                                max_duration=mel_spec_forget.size(1) * 2,
+                                no_ref_audio=True,
+                                steps=nfe_step,
+                                cfg_strength=cfg_strength,
+                                sway_sampling_coef=sway_sampling_coef,
+                            )
+                            unconditioned_mel_spec_forget = unconditioned_mel_spec_forget.to(torch.float32)
+                            unconditioned_mel_spec_forget = unconditioned_mel_spec_forget[
+                                :, mel_spec_forget.size(1) :
+                            ].to(self.accelerator.device)
+
+                        forget_loss, _, _ = self.model.forward_unlearn(
+                            mel_spec_forget,
+                            text=text_inputs_forget,
+                            lens=mel_lengths_forget,
+                            noise_scheduler=self.noise_scheduler,
+                            forget=True,
+                            flow_inp=unconditioned_mel_spec_forget,
+                        )
+                    else:
+                        forget_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+                    loss = (
+                        self.unlearn_params["lambda"] * retain_loss + (1 - self.unlearn_params["lambda"]) * forget_loss
+                    )
+
+                elif unlearn_method == "SGU":
+                    text_inputs_retain = batch["text_retain"]
+                    text_inputs_forget = batch["text_forget"]
+                    mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
+                    mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
+                    mel_lengths_retain = batch["mel_lengths_retain"]
+                    mel_lengths_forget = batch["mel_lengths_forget"]
+
+                    do_forget = torch.rand((1,)).item() < self.unlearn_params["forget_ratio"]
+                    if do_forget and mel_spec_forget.numel() > 0:
+                        mel_spec_concat = torch.cat([mel_spec_forget, mel_spec_retain], dim=1)
+                        text_inputs_concat = [
+                            text_inputs_forget[i] + " " + text_inputs_retain[i] for i in range(len(text_inputs_retain))
+                        ]
+                        mel_lengths_concat = mel_lengths_forget + mel_lengths_retain
+
+                        loss, _, _ = self.model.forward_unlearn_SGU(
+                            mel_spec_concat,
+                            text=text_inputs_concat,
+                            lens=mel_lengths_concat,
+                            retain_lens=mel_lengths_retain,
+                            noise_scheduler=self.noise_scheduler,
+                        )
+                    else:
+                        loss, _, _ = self.model.forward_unlearn(
+                            mel_spec_retain,
+                            text=text_inputs_retain,
+                            lens=mel_lengths_retain,
+                            noise_scheduler=self.noise_scheduler,
+                            forget=False,
+                        )
+                else:
+                    raise ValueError(f"Unknown unlearning method for pre-grad logging: {unlearn_method}")
+
+                self.accelerator.backward(loss)
+
+                has_delta_u_grad = False
+                for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
+                    if "delta_U" not in name or param.grad is None:
+                        continue
+
+                    grad = param.grad.detach()
+                    if grad.ndim >= 2:
+                        reduce_dims = tuple(range(grad.ndim - 1))
+                        mean_abs_grad = grad.abs().mean(dim=reduce_dims)
+                    else:
+                        mean_abs_grad = grad.abs()
+
+                    mean_abs_grad = mean_abs_grad.to(device="cpu", dtype=torch.float64)
+                    if name not in grad_abs_sums:
+                        grad_abs_sums[name] = torch.zeros_like(mean_abs_grad)
+                    grad_abs_sums[name] += mean_abs_grad
+                    has_delta_u_grad = True
+
+                if has_delta_u_grad:
+                    effective_steps += 1
+
+                self.optimizer.zero_grad(set_to_none=True)
+        finally:
+            self.optimizer.zero_grad(set_to_none=True)
+            torch.set_rng_state(cpu_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_state)
+            if was_training:
+                self.model.train()
+            else:
+                self.model.eval()
+
+        if effective_steps == 0:
+            print("SVDiff-U pre-grad logging skipped: no delta_U gradients were collected.")
+            return
+
+        if self.accelerator.is_local_main_process:
+            metrics = {
+                "svdiff_u_pre_grad_step": 1,
+                "svdiff_u_pre_grad/num_effective_steps": float(effective_steps),
+            }
+            singular_values_by_param = self._get_svdiff_u_singular_values_by_param_name()
+            sorted_grad_items = sorted(grad_abs_sums.items(), key=lambda x: x[0])
+            for index, (name, grad_abs_sum) in enumerate(sorted_grad_items):
+                mean_grad = grad_abs_sum / effective_steps
+                metric_prefix = self._svdiff_u_pre_grad_metric_prefix(index)
+                metrics[f"{metric_prefix}/mean"] = mean_grad.mean().item()
+                if self.logger == "wandb":
+                    x_vals = list(range(mean_grad.numel()))
+                    y_vals = mean_grad.cpu().tolist()
+                    metrics[f"{metric_prefix}/per_column_curve"] = wandb.plot.line_series(
+                        xs=x_vals,
+                        ys=[y_vals],
+                        keys=["avg_grad_magnitude"],
+                        title=f"{name} per-column average |grad|",
+                        xname="column_index",
+                    )
+
+                    singular_values = singular_values_by_param.get(name)
+                    if singular_values is not None:
+                        n_cols = min(mean_grad.numel(), singular_values.numel())
+                        normalized_grad = mean_grad[:n_cols] / singular_values[:n_cols].abs().clamp_min(1e-12)
+                        metrics[f"{metric_prefix}/mean_normalized_by_s"] = normalized_grad.mean().item()
+                        metrics[f"{metric_prefix}/per_column_curve_normalized_by_s"] = wandb.plot.line_series(
+                            xs=list(range(n_cols)),
+                            ys=[normalized_grad.cpu().tolist()],
+                            keys=["avg_grad_over_s"],
+                            title=f"{name} per-column average |grad| / (S + eps)",
+                            xname="column_index",
+                        )
+                print(f"SVDiff-U metric mapping: delta_u_{index:03d} -> {name}")
+
+            self.accelerator.log(metrics, step=0)
+            print(
+                f"Logged SVDiff-U per-column mean |grad| as one graph per delta_U tensor "
+                f"for {len(grad_abs_sums)} delta_U tensors "
+                f"over {effective_steps} steps."
+            )
 
     def _get_lr_schedule_updates(self, train_dataloader: DataLoader):
         # accelerator.prepare() dispatches batches to devices;
@@ -587,6 +829,12 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_dit_blocks_mlp()
 
         self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
+        self._run_svdiff_u_pre_grad_logging(
+            train_dataset,
+            num_workers=num_workers,
+            resumable_with_seed=resumable_with_seed,
+            unlearn_method="TGU",
+        )
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -796,12 +1044,19 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_dit_blocks_mlp()
 
         self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
+        self._run_svdiff_u_pre_grad_logging(
+            train_dataset,
+            num_workers=num_workers,
+            resumable_with_seed=resumable_with_seed,
+            unlearn_method="SGU",
+        )
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
         )
         print("Number of trainable parameters in student model:", end=" ")
         print(f"{num_trainable_params / 1e6:.3f}M")
+        exit()
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()

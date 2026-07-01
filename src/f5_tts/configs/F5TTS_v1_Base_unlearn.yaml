@@ -57,7 +57,9 @@ model:
     svdiff:
       use: False
     svdiff_u:
-      use: False
+      use: True
+      pre_grad_enabled: True # run pre-optimization gradient profiling before training
+      pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta_U tensor
 
 ckpts:
   logger: wandb # wandb | tensorboard | null

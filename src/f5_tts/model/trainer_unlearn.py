@@ -34,7 +34,7 @@ from f5_tts.model.dataset import (
     collate_fn_unlearning,
     get_dataset_num_speakers,
 )
-from f5_tts.model.modules import SVDParametrization
+from f5_tts.model.modules import SVDParametrization, SVDParametrizationU
 from f5_tts.model.utils import default, exists
 
 
@@ -203,10 +203,12 @@ class TrainerUnlearn:  # TODO add info logger
         decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
         return SequentialLR(self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates])
 
-    def reset_optimizer_and_scheduler_after_svdiff(self, warmup_updates: int, decay_updates: int):
+    def reset_optimizer_and_scheduler_for_trainable_params(
+        self, warmup_updates: int, decay_updates: int, context: str = "finetuning"
+    ):
         trainable_params = [p for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad]
         if not trainable_params:
-            raise ValueError("SVDiff reset found no trainable parameters for the optimizer.")
+            raise ValueError(f"{context} reset found no trainable parameters for the optimizer.")
 
         if self.bnb_optimizer:
             import bitsandbytes as bnb
@@ -221,6 +223,32 @@ class TrainerUnlearn:  # TODO add info logger
 
         self.scheduler = self._build_lr_scheduler(warmup_updates, decay_updates)
         self.optimizer, self.scheduler = self.accelerator.prepare(self.optimizer, self.scheduler)
+
+    def reset_optimizer_and_scheduler_after_svdiff(self, warmup_updates: int, decay_updates: int):
+        self.reset_optimizer_and_scheduler_for_trainable_params(warmup_updates, decay_updates, context="SVDiff")
+
+    def _get_svdiff_variant(self):
+        finetune_cfg = self.model_cfg_dict["model"].get("finetune", {})
+        svdiff = finetune_cfg.get("svdiff", {}).get("use", False)
+        svdiff_u = finetune_cfg.get("svdiff_u", {}).get("use", False)
+        if svdiff and svdiff_u:
+            raise ValueError("Only one of svdiff or svdiff_u can be enabled at a time.")
+        if svdiff:
+            return "svdiff"
+        if svdiff_u:
+            return "svdiff_u"
+        return None
+
+    def _prepare_model_for_svdiff_variant(self, warmup_updates: int, decay_updates: int):
+        svdiff_variant = self._get_svdiff_variant()
+        if svdiff_variant == "svdiff":
+            self.prepare_model_for_svdiff()
+        elif svdiff_variant == "svdiff_u":
+            self.prepare_model_for_svdiff_u()
+        else:
+            return
+
+        self.reset_optimizer_and_scheduler_after_svdiff(warmup_updates, decay_updates)
 
     def save_checkpoint(self, update, last=False):
         self.accelerator.wait_for_everyone()
@@ -558,9 +586,7 @@ class TrainerUnlearn:  # TODO add info logger
         elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
             self.prepare_model_for_dit_blocks_mlp()
 
-        if self.model_cfg_dict["model"].get("finetune", {}).get("svdiff", {}).get("use", False):
-            self.prepare_model_for_svdiff()
-            self.reset_optimizer_and_scheduler_after_svdiff(warmup_updates, decay_updates)
+        self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -769,9 +795,7 @@ class TrainerUnlearn:  # TODO add info logger
         elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
             self.prepare_model_for_dit_blocks_mlp()
 
-        if self.model_cfg_dict["model"].get("finetune", {}).get("svdiff", {}).get("use", False):
-            self.prepare_model_for_svdiff()
-            self.reset_optimizer_and_scheduler_after_svdiff(warmup_updates, decay_updates)
+        self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -1143,7 +1167,7 @@ class TrainerUnlearn:  # TODO add info logger
             if n in trainable_names:
                 p.requires_grad = True
 
-    def prepare_model_for_svdiff(self):
+    def _prepare_model_for_svdiff(self, parametrization_cls, trainable_param_name: str, label: str):
         module_params_dict = {
             module: list(module.named_parameters(recurse=False))
             for name, module in self.accelerator.unwrap_model(self.model).named_modules()
@@ -1155,13 +1179,18 @@ class TrainerUnlearn:  # TODO add info logger
                 if param.requires_grad:
                     full_param_name = f"{name}.{param_name}" if name else param_name
                     if "weight" in full_param_name:
-                        parametrize.register_parametrization(module, param_name, SVDParametrization(param))
+                        try:
+                            parametrize.register_parametrization(module, param_name, parametrization_cls(param))
+                        except (ValueError, RuntimeError):
+                            continue
 
         trainable_names = [
-            name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "delta_S" in name
+            name
+            for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
+            if trainable_param_name in name
         ]
 
-        print("Trainable parameters for SVDiff:")
+        print(f"Trainable parameters for {label}:")
         trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
         for name in trainable_names:
             print(f"  - {name}")
@@ -1172,3 +1201,9 @@ class TrainerUnlearn:  # TODO add info logger
         for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
             if n in trainable_names:
                 p.requires_grad = True
+
+    def prepare_model_for_svdiff(self):
+        self._prepare_model_for_svdiff(SVDParametrization, "delta_S", "SVDiff")
+
+    def prepare_model_for_svdiff_u(self):
+        self._prepare_model_for_svdiff(SVDParametrizationU, "delta_U", "SVDiff-U")

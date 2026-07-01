@@ -58,6 +58,15 @@ def main():
         action="store_true",
         help="Whether the unlearned model is trained with svdiff. Only matters for loading the correct checkpoint and does not affect inference process itself.",
     )
+    parser.add_argument(
+        "--svdiff_u",
+        "--svdiff-u",
+        action="store_true",
+        help=(
+            "Whether the unlearned model is trained with svdiff_u. Only matters for loading the correct checkpoint "
+            "and does not affect inference process itself."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -65,6 +74,9 @@ def main():
     exp_name = args.expname
     ckpt_step = args.ckptstep
     svdiff = args.svdiff
+    svdiff_u = args.svdiff_u
+    if svdiff and svdiff_u:
+        raise ValueError("Only one of --svdiff or --svdiff_u can be enabled.")
 
     nfe_step = args.nfestep
     ode_method = args.odemethod
@@ -180,7 +192,7 @@ def main():
 
     print(f"Loading model checkpoint from {ckpt_path}")
     dtype = torch.float32 if mel_spec_type == "bigvgan" else None
-    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema, svdiff=svdiff)
+    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema, svdiff=svdiff, svdiff_u=svdiff_u)
 
     if not os.path.exists(output_dir) and accelerator.is_main_process:
         os.makedirs(output_dir)

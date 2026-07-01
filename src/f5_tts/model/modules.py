@@ -825,3 +825,20 @@ class SVDParametrization(nn.Module):
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
         return self.U @ torch.diag(self.S + self.delta_S) @ self.Vh
+
+
+class SVDParametrizationU(nn.Module):
+    def __init__(self, weight: torch.Tensor):
+        super().__init__()
+
+        with torch.no_grad():
+            U, S, Vh = torch.linalg.svd(weight, full_matrices=False)
+
+        self.register_buffer("U", U)
+        self.register_buffer("Vh", Vh)
+        self.register_buffer("S", S)
+
+        self.delta_U = nn.Parameter(torch.zeros_like(U))
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        return (self.U + self.delta_U) @ torch.diag(self.S) @ self.Vh

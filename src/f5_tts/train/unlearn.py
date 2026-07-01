@@ -38,9 +38,13 @@ def main(model_cfg):
             unlearn_method = method
             break
 
+    svdiff_methods = {"svdiff", "svdiff_u"}
+    svdiff_methods_use = [params.use for method, params in model_cfg.model.finetune.items() if method in svdiff_methods]
+    assert sum(svdiff_methods_use) <= 1, "Only one SVDiff variant can be used at the same time"
+
     finetune_methods_use = [
-        params.use for method, params in model_cfg.model.finetune.items() if method != "svdiff"
-    ]  # allow svdiff to be used with finetuning methods
+        params.use for method, params in model_cfg.model.finetune.items() if method not in svdiff_methods
+    ]  # allow SVDiff variants to be used with finetuning methods
     assert sum(finetune_methods_use) <= 1, "Multiple finetune methods cannot be used at the same time"
 
     if sum(finetune_methods_use) == 0:

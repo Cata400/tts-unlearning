@@ -17,6 +17,7 @@
 ###   --seed SEED
 ###   --n_gpus N
 ###   --svdiff
+###   --svdiff_u
 ### Positional args (backwards compatible):
 ###   $1: expname
 ###   $2: ckptstep (default: last)
@@ -26,7 +27,7 @@
 #################################
 
 usage() {
-    echo "Usage: $0 --expname NAME [--ckptstep STEP] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N] [--svdiff]"
+    echo "Usage: $0 --expname NAME [--ckptstep STEP] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N] [--svdiff|--svdiff_u]"
     echo "       $0 EXP_NAME [CKPTSTEP] [PROCESSED_PATH] [SEED] [N_GPUS]"
 }
 
@@ -36,6 +37,7 @@ PROCESSED_LIBRITTS_DATASET_PATH=/alpha/catalin.ciocirlan/Datasets/LibriTTS/train
 SEED=42
 N_GPUS=1
 SVDIFF=0
+SVDIFF_U=0
 
 POSITIONAL=()
 while [ $# -gt 0 ]; do
@@ -62,6 +64,10 @@ while [ $# -gt 0 ]; do
             ;;
         --svdiff)
             SVDIFF=1
+            shift
+            ;;
+        --svdiff_u|--svdiff-u)
+            SVDIFF_U=1
             shift
             ;;
         -h|--help)
@@ -112,7 +118,12 @@ echo "PROCESSED_LIBRITTS_DATASET_PATH: $PROCESSED_LIBRITTS_DATASET_PATH"
 echo "SEED: $SEED"
 echo "N_GPUS: $N_GPUS"
 echo "SVDIFF: $SVDIFF"
+echo "SVDIFF_U: $SVDIFF_U"
 
+if [ "$SVDIFF" -eq 1 ] && [ "$SVDIFF_U" -eq 1 ]; then
+    echo "Only one of --svdiff or --svdiff_u can be enabled."
+    exit 1
+fi
 
 source /etc/profile.d/modules.sh
 module load anaconda/3
@@ -122,6 +133,9 @@ conda activate f5-tts
 SVDIFF_ARGS=()
 if [ "$SVDIFF" -eq 1 ]; then
     SVDIFF_ARGS=(--svdiff)
+fi
+if [ "$SVDIFF_U" -eq 1 ]; then
+    SVDIFF_ARGS=(--svdiff_u)
 fi
 
 if [ "$N_GPUS" -gt 1 ]

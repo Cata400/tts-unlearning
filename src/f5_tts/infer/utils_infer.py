@@ -28,7 +28,7 @@ from transformers import pipeline
 from vocos import Vocos
 
 from f5_tts.model import CFM
-from f5_tts.model.modules import SVDParametrization
+from f5_tts.model.modules import SVDParametrization, SVDParametrizationU
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 
 _ref_audio_cache = {}
@@ -180,7 +180,7 @@ def transcribe(ref_audio, language=None):
 # load model checkpoint for inference
 
 
-def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svdiff=False):
+def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svdiff=False, svdiff_u=False):
     ckpt_type = ckpt_path.split(".")[-1]
     if ckpt_type == "safetensors":
         from safetensors.torch import load_file
@@ -206,8 +206,12 @@ def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svd
         if ckpt_type == "safetensors":
             checkpoint = {"model_state_dict": checkpoint}
 
+    if svdiff and svdiff_u:
+        raise ValueError("Only one of svdiff or svdiff_u can be enabled when loading a checkpoint.")
     if svdiff:
         model = prepare_model_for_svdiff(model, checkpoint["model_state_dict"])
+    if svdiff_u:
+        model = prepare_model_for_svdiff_u(model, checkpoint["model_state_dict"])
 
     model.load_state_dict(checkpoint["model_state_dict"])
     if dtype is None:
@@ -234,6 +238,18 @@ def prepare_model_for_svdiff(model, checkpoint):
         if name not in svdiff_module_names:
             continue
         parametrize.register_parametrization(module, "weight", SVDParametrization(module.weight))
+
+    return model
+
+
+def prepare_model_for_svdiff_u(model, checkpoint):
+    svdiff_parametrize_keys = [k for k in checkpoint.keys() if "parametrizations" in k and "delta_U" in k]
+    svdiff_module_names = sorted(set([k.split(".parametrizations.")[0] for k in svdiff_parametrize_keys]))
+
+    for name, module in model.named_modules():
+        if name not in svdiff_module_names:
+            continue
+        parametrize.register_parametrization(module, "weight", SVDParametrizationU(module.weight))
 
     return model
 

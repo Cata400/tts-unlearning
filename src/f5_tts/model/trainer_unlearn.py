@@ -221,16 +221,16 @@ class TrainerUnlearn:  # TODO add info logger
         num_workers: int,
         resumable_with_seed: int | None,
         unlearn_method: str,
-    ):
+    ) -> dict[str, torch.Tensor] | None:
         if self._get_svdiff_variant() != "svdiff_u":
-            return
+            return None
 
         svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
         pre_grad_enabled = svdiff_u_cfg.get("pre_grad_enabled", False)
         pre_grad_steps = int(svdiff_u_cfg.get("pre_grad_steps", 0))
 
         if not pre_grad_enabled or pre_grad_steps <= 0:
-            return
+            return None
 
         print(f"Running SVDiff-U pre-grad logging for {pre_grad_steps} steps (method={unlearn_method})")
 
@@ -384,7 +384,7 @@ class TrainerUnlearn:  # TODO add info logger
 
         if effective_steps == 0:
             print("SVDiff-U pre-grad logging skipped: no delta_U gradients were collected.")
-            return
+            return None
 
         if self.accelerator.is_local_main_process:
             metrics = {
@@ -427,6 +427,41 @@ class TrainerUnlearn:  # TODO add info logger
                 f"Logged SVDiff-U per-column mean |grad| as one graph per delta_U tensor "
                 f"for {len(grad_abs_sums)} delta_U tensors "
                 f"over {effective_steps} steps."
+            )
+
+        # Return per-parameter mean gradient magnitudes for downstream top-k selection
+        grad_means: dict[str, torch.Tensor] = {}
+        for name, grad_abs_sum in grad_abs_sums.items():
+            grad_means[name] = grad_abs_sum / effective_steps
+        return grad_means
+
+    def _apply_svdiff_u_top_k_column_mask(self, grad_means: dict[str, torch.Tensor], top_k: int):
+        """Register gradient hooks on delta_U parameters to zero out non-top-k columns."""
+        print(f"Applying SVDiff-U top-k column mask: keeping {top_k} columns per delta_U")
+
+        for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
+            if "delta_U" not in name or name not in grad_means:
+                continue
+
+            mean_grad = grad_means[name]  # shape: (num_columns,)
+            num_columns = mean_grad.numel()
+            k = min(top_k, num_columns)
+
+            _, top_indices = torch.topk(mean_grad, k=k)
+            mask = torch.zeros(num_columns, device=param.device, dtype=param.dtype)
+            mask[top_indices] = 1.0
+
+            # Expand mask to match delta_U shape (rows, columns) -> broadcast across rows
+            if param.ndim == 2:
+                column_mask = mask.unsqueeze(0)  # (1, num_columns)
+            else:
+                column_mask = mask
+
+            param.register_hook(lambda grad, m=column_mask: grad * m)
+
+            print(
+                f"  {name}: kept {k}/{num_columns} columns "
+                f"(indices: {sorted(top_indices.cpu().tolist())[:10]}{'...' if k > 10 else ''})"
             )
 
     def _get_lr_schedule_updates(self, train_dataloader: DataLoader):
@@ -829,12 +864,17 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_dit_blocks_mlp()
 
         self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
-        self._run_svdiff_u_pre_grad_logging(
+        grad_means = self._run_svdiff_u_pre_grad_logging(
             train_dataset,
             num_workers=num_workers,
             resumable_with_seed=resumable_with_seed,
             unlearn_method="TGU",
         )
+
+        svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
+        pre_grad_top_k = svdiff_u_cfg.get("pre_grad_top_k", None)
+        if grad_means is not None and pre_grad_top_k is not None:
+            self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
 
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
@@ -1044,19 +1084,23 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_dit_blocks_mlp()
 
         self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
-        self._run_svdiff_u_pre_grad_logging(
+        grad_means = self._run_svdiff_u_pre_grad_logging(
             train_dataset,
             num_workers=num_workers,
             resumable_with_seed=resumable_with_seed,
             unlearn_method="SGU",
         )
 
+        svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
+        pre_grad_top_k = svdiff_u_cfg.get("pre_grad_top_k", None)
+        if grad_means is not None and pre_grad_top_k is not None:
+            self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
+
         num_trainable_params = sum(
             p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
         )
         print("Number of trainable parameters in student model:", end=" ")
         print(f"{num_trainable_params / 1e6:.3f}M")
-        exit()
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()

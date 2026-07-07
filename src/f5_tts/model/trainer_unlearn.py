@@ -435,9 +435,15 @@ class TrainerUnlearn:  # TODO add info logger
             grad_means[name] = grad_abs_sum / effective_steps
         return grad_means
 
-    def _apply_svdiff_u_top_k_column_mask(self, grad_means: dict[str, torch.Tensor], top_k: int):
-        """Register gradient hooks on delta_U parameters to zero out non-top-k columns."""
+    def _apply_svdiff_u_top_k_column_mask(self, grad_means: dict[str, torch.Tensor], top_k: int) -> int:
+        """Register gradient hooks on delta_U parameters to zero out non-top-k columns.
+
+        Returns the effective number of trainable elements across all masked delta_U params.
+        """
         print(f"Applying SVDiff-U top-k column mask: keeping {top_k} columns per delta_U")
+
+        effective_delta_u_elements = 0
+        total_delta_u_elements = 0
 
         for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
             if "delta_U" not in name or name not in grad_means:
@@ -454,15 +460,26 @@ class TrainerUnlearn:  # TODO add info logger
             # Expand mask to match delta_U shape (rows, columns) -> broadcast across rows
             if param.ndim == 2:
                 column_mask = mask.unsqueeze(0)  # (1, num_columns)
+                rows = param.shape[0]
             else:
                 column_mask = mask
+                rows = 1
 
             param.register_hook(lambda grad, m=column_mask: grad * m)
+
+            effective_delta_u_elements += rows * k
+            total_delta_u_elements += param.numel()
 
             print(
                 f"  {name}: kept {k}/{num_columns} columns "
                 f"(indices: {sorted(top_indices.cpu().tolist())[:10]}{'...' if k > 10 else ''})"
             )
+
+        print(
+            f"  Effective delta_U elements: {effective_delta_u_elements:,} / {total_delta_u_elements:,} "
+            f"({100 * effective_delta_u_elements / max(total_delta_u_elements, 1):.1f}%)"
+        )
+        return effective_delta_u_elements
 
     def _get_lr_schedule_updates(self, train_dataloader: DataLoader):
         # accelerator.prepare() dispatches batches to devices;
@@ -874,13 +891,20 @@ class TrainerUnlearn:  # TODO add info logger
         svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
         pre_grad_top_k = svdiff_u_cfg.get("pre_grad_top_k", None)
         if grad_means is not None and pre_grad_top_k is not None:
-            self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
-
-        num_trainable_params = sum(
-            p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
-        )
-        print("Number of trainable parameters in student model:", end=" ")
-        print(f"{num_trainable_params / 1e6:.3f}M")
+            effective_delta_u_elements = self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
+            # Compute effective trainable params: non-delta_U trainable + effective delta_U elements
+            non_delta_u_trainable = sum(
+                p.numel()
+                for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
+                if p.requires_grad and "delta_U" not in n
+            )
+            effective_trainable = non_delta_u_trainable + effective_delta_u_elements
+            print(f"Effective trainable parameters (after top-k masking): {effective_trainable / 1e6:.3f}M")
+        else:
+            num_trainable_params = sum(
+                p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
+            )
+            print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()
@@ -1094,13 +1118,21 @@ class TrainerUnlearn:  # TODO add info logger
         svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
         pre_grad_top_k = svdiff_u_cfg.get("pre_grad_top_k", None)
         if grad_means is not None and pre_grad_top_k is not None:
-            self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
-
-        num_trainable_params = sum(
-            p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
-        )
-        print("Number of trainable parameters in student model:", end=" ")
-        print(f"{num_trainable_params / 1e6:.3f}M")
+            effective_delta_u_elements = self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
+            # Compute effective trainable params: non-delta_U trainable + effective delta_U elements
+            non_delta_u_trainable = sum(
+                p.numel()
+                for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
+                if p.requires_grad and "delta_U" not in n
+            )
+            effective_trainable = non_delta_u_trainable + effective_delta_u_elements
+            print(f"Effective trainable parameters (after top-k masking): {effective_trainable / 1e6:.3f}M")
+        else:
+            num_trainable_params = sum(
+                p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
+            )
+            print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
+        exit()
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()

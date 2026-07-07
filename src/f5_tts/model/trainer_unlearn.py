@@ -1132,7 +1132,6 @@ class TrainerUnlearn:  # TODO add info logger
                 p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
             )
             print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
-        exit()
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()

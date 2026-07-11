@@ -83,10 +83,12 @@ unlearn:
     SGU:
       use: True
       forget_ratio: 0.2 # probability of optimizing for forget
-      balanced_unlearn_sample_oversample_forget: false # whether to oversample forget samples for balanced_unlearn_sample batch type
-      retain_duration_budget_ratio: 1.0 # cap retain pool to ~forget pool total duration
+      balanced_unlearn_sample_oversample_forget: True # whether to oversample forget samples for balanced_unlearn_sample batch type
+      retain_duration_budget_ratio: null # cap retain pool to ~forget pool total duration
       retain_duration_budget_reset_per_epoch: False # whether to reset retain duration budget at the beginning of each epoch
-      forget_duration_budget_ratio: 0.1 # cap forget pool
+      forget_duration_budget_ratio: null # cap forget pool
+      always_retain_and_forget: False # default False, whether to have a combined loss instead of alternating between retain and forget optimization
+      use_torchjd: False # default False, whether to use torchjd for unlearning; if True forget_ratio is ignored
 
 hydra:
   run:

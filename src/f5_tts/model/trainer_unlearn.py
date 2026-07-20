@@ -335,15 +335,14 @@ class TrainerUnlearn:  # TODO add info logger
                     mel_lengths_retain = batch["mel_lengths_retain"]
                     mel_lengths_forget = batch["mel_lengths_forget"]
 
-                    do_forget = torch.rand((1,)).item() < self.unlearn_params["forget_ratio"]
-                    if do_forget and mel_spec_forget.numel() > 0:
+                    if mel_spec_forget.numel() > 0:  # if there is at least one forget sample
                         mel_spec_concat = torch.cat([mel_spec_forget, mel_spec_retain], dim=1)
                         text_inputs_concat = [
                             text_inputs_forget[i] + " " + text_inputs_retain[i] for i in range(len(text_inputs_retain))
                         ]
                         mel_lengths_concat = mel_lengths_forget + mel_lengths_retain
 
-                        loss, _, _ = self.model.forward_unlearn_SGU(
+                        forget_loss, forget_cond, forget_pred = self.model.forward_unlearn_SGU(
                             mel_spec_concat,
                             text=text_inputs_concat,
                             lens=mel_lengths_concat,
@@ -351,13 +350,16 @@ class TrainerUnlearn:  # TODO add info logger
                             noise_scheduler=self.noise_scheduler,
                         )
                     else:
-                        loss, _, _ = self.model.forward_unlearn(
-                            mel_spec_retain,
-                            text=text_inputs_retain,
-                            lens=mel_lengths_retain,
-                            noise_scheduler=self.noise_scheduler,
-                            forget=False,
-                        )
+                        forget_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+                    retain_loss, retain_cond, retain_pred = self.model.forward_unlearn(
+                        mel_spec_retain,
+                        text=text_inputs_retain,
+                        lens=mel_lengths_retain,
+                        noise_scheduler=self.noise_scheduler,
+                        forget=False,
+                    )
+                    loss = retain_loss + forget_loss
                 else:
                     raise ValueError(f"Unknown unlearning method for pre-grad logging: {unlearn_method}")
 
@@ -1221,12 +1223,8 @@ class TrainerUnlearn:  # TODO add info logger
                         )
 
                         if not self.unlearn_params.get("use_torchjd", False):
-                            # type 1
-                            loss = (1 - self.unlearn_params["forget_ratio"]) * retain_loss + self.unlearn_params[
-                                "forget_ratio"
-                            ] * forget_loss
                             # type 2
-                            # loss = retain_loss + self.unlearn_params["forget_ratio"] * forget_loss
+                            loss = retain_loss + self.unlearn_params["forget_ratio"] * forget_loss
                     else:
                         do_forget = torch.rand((1,)).item() < self.unlearn_params["forget_ratio"]
                         if do_forget and mel_spec_forget.numel() > 0:  # if there is at least one forget sample

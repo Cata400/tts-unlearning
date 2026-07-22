@@ -842,3 +842,22 @@ class SVDParametrizationU(nn.Module):
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
         return (self.U + self.delta_U) @ torch.diag(self.S) @ self.Vh
+
+
+class SVDParametrizationV(nn.Module):
+    def __init__(self, weight: torch.Tensor):
+        super().__init__()
+
+        with torch.no_grad():
+            U, S, Vh = torch.linalg.svd(weight, full_matrices=False)
+
+        self.register_buffer("U", U)
+        self.register_buffer("Vh", Vh)
+        self.register_buffer("S", S)
+
+        # delta_V has the same layout as delta_U: (n, k), i.e. Vh.T.shape.
+        # Columns of delta_V correspond to the k singular components (same as delta_U columns).
+        self.delta_V = nn.Parameter(torch.zeros_like(Vh.T))
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        return self.U @ torch.diag(self.S) @ (self.Vh + self.delta_V.T)

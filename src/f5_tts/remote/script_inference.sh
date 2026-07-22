@@ -17,7 +17,7 @@
 ###   --seed SEED
 ###   --n_gpus N
 ###   --svdiff
-###   --svdiff_u
+###   --svdiff_uv
 ### Positional args (backwards compatible):
 ###   $1: expname
 ###   $2: ckptstep (default: last)
@@ -27,7 +27,7 @@
 #################################
 
 usage() {
-    echo "Usage: $0 --expname NAME [--ckptstep STEP] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N] [--svdiff|--svdiff_u]"
+    echo "Usage: $0 --expname NAME [--ckptstep STEP] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N] [--svdiff|--svdiff_uv]"
     echo "       $0 EXP_NAME [CKPTSTEP] [PROCESSED_PATH] [SEED] [N_GPUS]"
 }
 
@@ -37,7 +37,7 @@ PROCESSED_LIBRITTS_DATASET_PATH=/alpha/catalin.ciocirlan/Datasets/LibriTTS/train
 SEED=42
 N_GPUS=1
 SVDIFF=0
-SVDIFF_U=0
+SVDIFF_UV=0
 
 POSITIONAL=()
 while [ $# -gt 0 ]; do
@@ -66,8 +66,8 @@ while [ $# -gt 0 ]; do
             SVDIFF=1
             shift
             ;;
-        --svdiff_u|--svdiff-u)
-            SVDIFF_U=1
+        --svdiff_uv|--svdiff-uv)
+            SVDIFF_UV=1
             shift
             ;;
         -h|--help)
@@ -118,10 +118,10 @@ echo "PROCESSED_LIBRITTS_DATASET_PATH: $PROCESSED_LIBRITTS_DATASET_PATH"
 echo "SEED: $SEED"
 echo "N_GPUS: $N_GPUS"
 echo "SVDIFF: $SVDIFF"
-echo "SVDIFF_U: $SVDIFF_U"
+echo "SVDIFF_UV: $SVDIFF_UV"
 
-if [ "$SVDIFF" -eq 1 ] && [ "$SVDIFF_U" -eq 1 ]; then
-    echo "Only one of --svdiff or --svdiff_u can be enabled."
+if [ "$SVDIFF" -eq 1 ] && [ "$SVDIFF_UV" -eq 1 ]; then
+    echo "Only one of --svdiff or --svdiff_uv can be enabled."
     exit 1
 fi
 
@@ -134,8 +134,8 @@ SVDIFF_ARGS=()
 if [ "$SVDIFF" -eq 1 ]; then
     SVDIFF_ARGS=(--svdiff)
 fi
-if [ "$SVDIFF_U" -eq 1 ]; then
-    SVDIFF_ARGS=(--svdiff_u)
+if [ "$SVDIFF_UV" -eq 1 ]; then
+    SVDIFF_ARGS=(--svdiff_uv)
 fi
 
 if [ "$N_GPUS" -gt 1 ]

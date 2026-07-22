@@ -37,7 +37,11 @@ from f5_tts.model.dataset import (
     collate_fn_unlearning,
     get_dataset_num_speakers,
 )
-from f5_tts.model.modules import SVDParametrization, SVDParametrizationU
+from f5_tts.model.modules import (
+    SVDParametrization,
+    SVDParametrizationU,
+    SVDParametrizationV,
+)
 from f5_tts.model.utils import default, exists
 
 
@@ -195,18 +199,33 @@ class TrainerUnlearn:  # TODO add info logger
         wandb.define_metric("lr", step_metric="train_step")
         wandb.define_metric("weight_stats_step")
         wandb.define_metric("weight_stats/*", step_metric="weight_stats_step")
-        wandb.define_metric("svdiff_u_pre_grad_step")
-        wandb.define_metric("svdiff_u_pre_grad/*", step_metric="svdiff_u_pre_grad_step")
+        wandb.define_metric("svdiff_uv_pre_grad_step")
+        wandb.define_metric("svdiff_uv_pre_grad/*", step_metric="svdiff_uv_pre_grad_step")
 
     @staticmethod
     def _weight_stat_metric_prefix(name: str) -> str:
         return f"weight_stats/{name.replace('.', '/')}"
 
     @staticmethod
-    def _svdiff_u_pre_grad_metric_prefix(index: int) -> str:
-        return f"svdiff_u_pre_grad/delta_u_{index:03d}"
+    def _svdiff_uv_pre_grad_metric_prefix(index: int, variant: str) -> str:
+        return f"svdiff_uv_pre_grad/delta_{variant.lower()}_{index:03d}"
 
-    def _get_svdiff_u_singular_values_by_param_name(self) -> dict[str, torch.Tensor]:
+    def _get_svdiff_uv_type(self) -> str | None:
+        """Return the configured svdiff_uv variant ('u' or 'v'), or None if not enabled."""
+        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
+        if not svdiff_uv_cfg.get("use", False):
+            return None
+        variant = str(svdiff_uv_cfg.get("type", "u")).lower()
+        if variant not in ("u", "v"):
+            raise ValueError(f"svdiff_uv.type must be 'u' or 'v', got: {variant!r}")
+        return variant
+
+    @staticmethod
+    def _svdiff_uv_delta_param_name(variant: str) -> str:
+        return "delta_U" if variant == "u" else "delta_V"
+
+    def _get_svdiff_uv_singular_values_by_param_name(self, variant: str) -> dict[str, torch.Tensor]:
+        delta_attr = self._svdiff_uv_delta_param_name(variant)
         singular_values_by_param: dict[str, torch.Tensor] = {}
         for module_name, module in self.accelerator.unwrap_model(self.model).named_modules():
             if not hasattr(module, "parametrizations") or "weight" not in module.parametrizations:
@@ -216,36 +235,39 @@ class TrainerUnlearn:  # TODO add info logger
             if len(parametrizations) == 0:
                 continue
             parametrization = parametrizations[0]
-            if not (hasattr(parametrization, "delta_U") and hasattr(parametrization, "S")):
+            if not (hasattr(parametrization, delta_attr) and hasattr(parametrization, "S")):
                 continue
 
             param_name = (
-                f"{module_name}.parametrizations.weight.0.delta_U"
+                f"{module_name}.parametrizations.weight.0.{delta_attr}"
                 if module_name
-                else "parametrizations.weight.0.delta_U"
+                else f"parametrizations.weight.0.{delta_attr}"
             )
             singular_values_by_param[param_name] = parametrization.S.detach().to(device="cpu", dtype=torch.float64)
 
         return singular_values_by_param
 
-    def _run_svdiff_u_pre_grad_logging(
+    def _run_svdiff_uv_pre_grad_logging(
         self,
         train_dataset: Dataset,
         num_workers: int,
         resumable_with_seed: int | None,
         unlearn_method: str,
     ) -> dict[str, torch.Tensor] | None:
-        if self._get_svdiff_variant() != "svdiff_u":
+        if self._get_svdiff_variant() != "svdiff_uv":
             return None
 
-        svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
-        pre_grad_enabled = svdiff_u_cfg.get("pre_grad_enabled", False)
-        pre_grad_steps = int(svdiff_u_cfg.get("pre_grad_steps", 0))
+        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
+        pre_grad_enabled = svdiff_uv_cfg.get("pre_grad_enabled", False)
+        pre_grad_steps = int(svdiff_uv_cfg.get("pre_grad_steps", 0))
 
         if not pre_grad_enabled or pre_grad_steps <= 0:
             return None
 
-        print(f"Running SVDiff-U pre-grad logging for {pre_grad_steps} steps (method={unlearn_method})")
+        variant = self._get_svdiff_uv_type()
+        delta_param_name = self._svdiff_uv_delta_param_name(variant)
+        label = f"SVDiff-{variant.upper()}"
+        print(f"Running {label} pre-grad logging for {pre_grad_steps} steps (method={unlearn_method})")
 
         pre_dataloader = self.create_dataloader(
             train_dataset, num_workers=num_workers, resumable_with_seed=resumable_with_seed
@@ -365,9 +387,9 @@ class TrainerUnlearn:  # TODO add info logger
 
                 self.accelerator.backward(loss)
 
-                has_delta_u_grad = False
+                has_delta_grad = False
                 for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
-                    if "delta_U" not in name or param.grad is None:
+                    if delta_param_name not in name or param.grad is None:
                         continue
 
                     grad = param.grad.detach()
@@ -381,9 +403,9 @@ class TrainerUnlearn:  # TODO add info logger
                     if name not in grad_abs_sums:
                         grad_abs_sums[name] = torch.zeros_like(mean_abs_grad)
                     grad_abs_sums[name] += mean_abs_grad
-                    has_delta_u_grad = True
+                    has_delta_grad = True
 
-                if has_delta_u_grad:
+                if has_delta_grad:
                     effective_steps += 1
 
                 self.optimizer.zero_grad(set_to_none=True)
@@ -398,19 +420,20 @@ class TrainerUnlearn:  # TODO add info logger
                 self.model.eval()
 
         if effective_steps == 0:
-            print("SVDiff-U pre-grad logging skipped: no delta_U gradients were collected.")
+            print(f"{label} pre-grad logging skipped: no {delta_param_name} gradients were collected.")
             return None
 
         if self.accelerator.is_local_main_process:
             metrics = {
-                "svdiff_u_pre_grad_step": 1,
-                "svdiff_u_pre_grad/num_effective_steps": float(effective_steps),
+                "svdiff_uv_pre_grad_step": 1,
+                "svdiff_uv_pre_grad/num_effective_steps": float(effective_steps),
+                "svdiff_uv_pre_grad/variant": variant,
             }
-            singular_values_by_param = self._get_svdiff_u_singular_values_by_param_name()
+            singular_values_by_param = self._get_svdiff_uv_singular_values_by_param_name(variant)
             sorted_grad_items = sorted(grad_abs_sums.items(), key=lambda x: x[0])
             for index, (name, grad_abs_sum) in enumerate(sorted_grad_items):
                 mean_grad = grad_abs_sum / effective_steps
-                metric_prefix = self._svdiff_u_pre_grad_metric_prefix(index)
+                metric_prefix = self._svdiff_uv_pre_grad_metric_prefix(index, variant)
                 metrics[f"{metric_prefix}/mean"] = mean_grad.mean().item()
                 if self.logger == "wandb":
                     x_vals = list(range(mean_grad.numel()))
@@ -435,12 +458,12 @@ class TrainerUnlearn:  # TODO add info logger
                             title=f"{name} per-column average |grad| / (S + eps)",
                             xname="column_index",
                         )
-                print(f"SVDiff-U metric mapping: delta_u_{index:03d} -> {name}")
+                print(f"{label} metric mapping: delta_{variant}_{index:03d} -> {name}")
 
             self.accelerator.log(metrics, step=0)
             print(
-                f"Logged SVDiff-U per-column mean |grad| as one graph per delta_U tensor "
-                f"for {len(grad_abs_sums)} delta_U tensors "
+                f"Logged {label} per-column mean |grad| as one graph per {delta_param_name} tensor "
+                f"for {len(grad_abs_sums)} {delta_param_name} tensors "
                 f"over {effective_steps} steps."
             )
 
@@ -450,18 +473,22 @@ class TrainerUnlearn:  # TODO add info logger
             grad_means[name] = grad_abs_sum / effective_steps
         return grad_means
 
-    def _apply_svdiff_u_top_k_column_mask(self, grad_means: dict[str, torch.Tensor], top_k: int) -> int:
-        """Register gradient hooks on delta_U parameters to zero out non-top-k columns.
+    def _apply_svdiff_uv_top_k_column_mask(self, grad_means: dict[str, torch.Tensor], top_k: int, variant: str) -> int:
+        """Register gradient hooks on delta parameters to zero out non-top-k columns.
 
-        Returns the effective number of trainable elements across all masked delta_U params.
+        Works for both delta_U (shape (m, k)) and delta_V (shape (n, k)).
+
+        Returns the effective number of trainable elements across all masked delta params.
         """
-        print(f"Applying SVDiff-U top-k column mask: keeping {top_k} columns per delta_U")
+        delta_param_name = self._svdiff_uv_delta_param_name(variant)
+        label = f"SVDiff-{variant.upper()}"
+        print(f"Applying {label} top-k column mask: keeping {top_k} columns per {delta_param_name}")
 
-        effective_delta_u_elements = 0
-        total_delta_u_elements = 0
+        effective_delta_elements = 0
+        total_delta_elements = 0
 
         for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
-            if "delta_U" not in name or name not in grad_means:
+            if delta_param_name not in name or name not in grad_means:
                 continue
 
             mean_grad = grad_means[name]  # shape: (num_columns,)
@@ -472,7 +499,7 @@ class TrainerUnlearn:  # TODO add info logger
             mask = torch.zeros(num_columns, device=param.device, dtype=param.dtype)
             mask[top_indices] = 1.0
 
-            # Expand mask to match delta_U shape (rows, columns) -> broadcast across rows
+            # Expand mask to match delta shape (rows, columns) -> broadcast across rows
             if param.ndim == 2:
                 column_mask = mask.unsqueeze(0)  # (1, num_columns)
                 rows = param.shape[0]
@@ -482,8 +509,8 @@ class TrainerUnlearn:  # TODO add info logger
 
             param.register_hook(lambda grad, m=column_mask: grad * m)
 
-            effective_delta_u_elements += rows * k
-            total_delta_u_elements += param.numel()
+            effective_delta_elements += rows * k
+            total_delta_elements += param.numel()
 
             print(
                 f"  {name}: kept {k}/{num_columns} columns "
@@ -491,10 +518,10 @@ class TrainerUnlearn:  # TODO add info logger
             )
 
         print(
-            f"  Effective delta_U elements: {effective_delta_u_elements:,} / {total_delta_u_elements:,} "
-            f"({100 * effective_delta_u_elements / max(total_delta_u_elements, 1):.1f}%)"
+            f"  Effective {delta_param_name} elements: {effective_delta_elements:,} / {total_delta_elements:,} "
+            f"({100 * effective_delta_elements / max(total_delta_elements, 1):.1f}%)"
         )
-        return effective_delta_u_elements
+        return effective_delta_elements
 
     def _get_lr_schedule_updates(self, train_dataloader: DataLoader):
         # accelerator.prepare() dispatches batches to devices;
@@ -539,21 +566,21 @@ class TrainerUnlearn:  # TODO add info logger
     def _get_svdiff_variant(self):
         finetune_cfg = self.model_cfg_dict["model"].get("finetune", {})
         svdiff = finetune_cfg.get("svdiff", {}).get("use", False)
-        svdiff_u = finetune_cfg.get("svdiff_u", {}).get("use", False)
-        if svdiff and svdiff_u:
-            raise ValueError("Only one of svdiff or svdiff_u can be enabled at a time.")
+        svdiff_uv = finetune_cfg.get("svdiff_uv", {}).get("use", False)
+        if svdiff and svdiff_uv:
+            raise ValueError("Only one of svdiff or svdiff_uv can be enabled at a time.")
         if svdiff:
             return "svdiff"
-        if svdiff_u:
-            return "svdiff_u"
+        if svdiff_uv:
+            return "svdiff_uv"
         return None
 
     def _prepare_model_for_svdiff_variant(self, warmup_updates: int, decay_updates: int):
         svdiff_variant = self._get_svdiff_variant()
         if svdiff_variant == "svdiff":
             self.prepare_model_for_svdiff()
-        elif svdiff_variant == "svdiff_u":
-            self.prepare_model_for_svdiff_u()
+        elif svdiff_variant == "svdiff_uv":
+            self.prepare_model_for_svdiff_uv()
         else:
             return
 
@@ -896,24 +923,28 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_dit_blocks_mlp()
 
         self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
-        grad_means = self._run_svdiff_u_pre_grad_logging(
+        grad_means = self._run_svdiff_uv_pre_grad_logging(
             train_dataset,
             num_workers=num_workers,
             resumable_with_seed=resumable_with_seed,
             unlearn_method="TGU",
         )
 
-        svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
-        pre_grad_top_k = svdiff_u_cfg.get("pre_grad_top_k", None)
+        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
+        pre_grad_top_k = svdiff_uv_cfg.get("pre_grad_top_k", None)
         if grad_means is not None and pre_grad_top_k is not None:
-            effective_delta_u_elements = self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
-            # Compute effective trainable params: non-delta_U trainable + effective delta_U elements
-            non_delta_u_trainable = sum(
+            variant = self._get_svdiff_uv_type()
+            delta_param_name = self._svdiff_uv_delta_param_name(variant)
+            effective_delta_uv_elements = self._apply_svdiff_uv_top_k_column_mask(
+                grad_means, int(pre_grad_top_k), variant
+            )
+            # Compute effective trainable params: non-delta trainable + effective delta elements
+            non_delta_uv_trainable = sum(
                 p.numel()
                 for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
-                if p.requires_grad and "delta_U" not in n
+                if p.requires_grad and delta_param_name not in n
             )
-            effective_trainable = non_delta_u_trainable + effective_delta_u_elements
+            effective_trainable = non_delta_uv_trainable + effective_delta_uv_elements
             print(f"Effective trainable parameters (after top-k masking): {effective_trainable / 1e6:.3f}M")
         else:
             num_trainable_params = sum(
@@ -1123,24 +1154,28 @@ class TrainerUnlearn:  # TODO add info logger
             self.prepare_model_for_dit_blocks_mlp()
 
         self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
-        grad_means = self._run_svdiff_u_pre_grad_logging(
+        grad_means = self._run_svdiff_uv_pre_grad_logging(
             train_dataset,
             num_workers=num_workers,
             resumable_with_seed=resumable_with_seed,
             unlearn_method="SGU",
         )
 
-        svdiff_u_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_u", {})
-        pre_grad_top_k = svdiff_u_cfg.get("pre_grad_top_k", None)
+        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
+        pre_grad_top_k = svdiff_uv_cfg.get("pre_grad_top_k", None)
         if grad_means is not None and pre_grad_top_k is not None:
-            effective_delta_u_elements = self._apply_svdiff_u_top_k_column_mask(grad_means, int(pre_grad_top_k))
-            # Compute effective trainable params: non-delta_U trainable + effective delta_U elements
-            non_delta_u_trainable = sum(
+            variant = self._get_svdiff_uv_type()
+            delta_param_name = self._svdiff_uv_delta_param_name(variant)
+            effective_delta_uv_elements = self._apply_svdiff_uv_top_k_column_mask(
+                grad_means, int(pre_grad_top_k), variant
+            )
+            # Compute effective trainable params: non-delta trainable + effective delta elements
+            non_delta_uv_trainable = sum(
                 p.numel()
                 for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
-                if p.requires_grad and "delta_U" not in n
+                if p.requires_grad and delta_param_name not in n
             )
-            effective_trainable = non_delta_u_trainable + effective_delta_u_elements
+            effective_trainable = non_delta_uv_trainable + effective_delta_uv_elements
             print(f"Effective trainable parameters (after top-k masking): {effective_trainable / 1e6:.3f}M")
         else:
             num_trainable_params = sum(
@@ -1589,5 +1624,11 @@ class TrainerUnlearn:  # TODO add info logger
     def prepare_model_for_svdiff(self):
         self._prepare_model_for_svdiff(SVDParametrization, "delta_S", "SVDiff")
 
-    def prepare_model_for_svdiff_u(self):
-        self._prepare_model_for_svdiff(SVDParametrizationU, "delta_U", "SVDiff-U")
+    def prepare_model_for_svdiff_uv(self):
+        variant = self._get_svdiff_uv_type()
+        if variant == "u":
+            self._prepare_model_for_svdiff(SVDParametrizationU, "delta_U", "SVDiff-U")
+        elif variant == "v":
+            self._prepare_model_for_svdiff(SVDParametrizationV, "delta_V", "SVDiff-V")
+        else:
+            raise ValueError(f"Invalid svdiff_uv variant: {variant!r} (expected 'u' or 'v').")

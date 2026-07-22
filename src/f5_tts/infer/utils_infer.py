@@ -28,7 +28,11 @@ from transformers import pipeline
 from vocos import Vocos
 
 from f5_tts.model import CFM
-from f5_tts.model.modules import SVDParametrization, SVDParametrizationU
+from f5_tts.model.modules import (
+    SVDParametrization,
+    SVDParametrizationU,
+    SVDParametrizationV,
+)
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 
 _ref_audio_cache = {}
@@ -180,7 +184,7 @@ def transcribe(ref_audio, language=None):
 # load model checkpoint for inference
 
 
-def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svdiff=False, svdiff_u=False):
+def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svdiff=False, svdiff_uv=False):
     ckpt_type = ckpt_path.split(".")[-1]
     if ckpt_type == "safetensors":
         from safetensors.torch import load_file
@@ -206,12 +210,12 @@ def load_checkpoint(model, ckpt_path, device: str, dtype=None, use_ema=True, svd
         if ckpt_type == "safetensors":
             checkpoint = {"model_state_dict": checkpoint}
 
-    if svdiff and svdiff_u:
-        raise ValueError("Only one of svdiff or svdiff_u can be enabled when loading a checkpoint.")
+    if svdiff and svdiff_uv:
+        raise ValueError("Only one of svdiff or svdiff_uv can be enabled when loading a checkpoint.")
     if svdiff:
         model = prepare_model_for_svdiff(model, checkpoint["model_state_dict"])
-    if svdiff_u:
-        model = prepare_model_for_svdiff_u(model, checkpoint["model_state_dict"])
+    if svdiff_uv:
+        model = prepare_model_for_svdiff_uv(model, checkpoint["model_state_dict"])
 
     model.load_state_dict(checkpoint["model_state_dict"])
     if dtype is None:
@@ -252,6 +256,41 @@ def prepare_model_for_svdiff_u(model, checkpoint):
         parametrize.register_parametrization(module, "weight", SVDParametrizationU(module.weight))
 
     return model
+
+
+def prepare_model_for_svdiff_v(model, checkpoint):
+    svdiff_parametrize_keys = [k for k in checkpoint.keys() if "parametrizations" in k and "delta_V" in k]
+    svdiff_module_names = sorted(set([k.split(".parametrizations.")[0] for k in svdiff_parametrize_keys]))
+
+    for name, module in model.named_modules():
+        if name not in svdiff_module_names:
+            continue
+        parametrize.register_parametrization(module, "weight", SVDParametrizationV(module.weight))
+
+    return model
+
+
+def prepare_model_for_svdiff_uv(model, checkpoint):
+    """Register the appropriate SVD parametrization based on which delta keys are present.
+
+    Auto-detects U vs V by inspecting the checkpoint state-dict for `delta_U` or `delta_V`.
+    Errors if both are present in the same checkpoint.
+    """
+    has_u = any("parametrizations" in k and "delta_U" in k for k in checkpoint.keys())
+    has_v = any("parametrizations" in k and "delta_V" in k for k in checkpoint.keys())
+    if has_u and has_v:
+        raise ValueError(
+            "Checkpoint contains both delta_U and delta_V parametrization keys; "
+            "only one svdiff_uv variant is supported at a time."
+        )
+    if has_u:
+        return prepare_model_for_svdiff_u(model, checkpoint)
+    if has_v:
+        return prepare_model_for_svdiff_v(model, checkpoint)
+    raise ValueError(
+        "svdiff_uv=True was requested but no delta_U or delta_V parametrization keys were found "
+        "in the checkpoint state_dict."
+    )
 
 
 # load model for inference

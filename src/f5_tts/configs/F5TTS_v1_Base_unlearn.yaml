@@ -56,11 +56,12 @@ model:
       version: v1 # v1 | v2
     svdiff:
       use: False
-    svdiff_u:
+    svdiff_uv:
       use: True
+      type: v # u | v: which SVD factor to delta-fine-tune (U columns or V columns before the transpose)
       pre_grad_enabled: True # run pre-optimization gradient profiling before training
-      pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta_U tensor
-      pre_grad_top_k: 1 # keep only top-k columns (by mean |grad|) trainable per delta_U; null to keep all
+      pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta tensor
+      pre_grad_top_k: 10 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
 
 ckpts:
   logger: wandb # wandb | tensorboard | null

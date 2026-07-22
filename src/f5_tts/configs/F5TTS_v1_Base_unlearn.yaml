@@ -58,10 +58,11 @@ model:
       use: False
     svdiff_uv:
       use: True
-      type: v # u | v: which SVD factor to delta-fine-tune (U columns or V columns before the transpose)
+      type: u # u | v: which SVD factor to delta-fine-tune (U columns or V columns before the transpose)
       pre_grad_enabled: True # run pre-optimization gradient profiling before training
       pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta tensor
       pre_grad_top_k: 10 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
+      use_torchjd: False # default False, whether to use torchjd for gradient computation
 
 ckpts:
   logger: wandb # wandb | tensorboard | null

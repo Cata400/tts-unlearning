@@ -281,6 +281,8 @@ class TrainerUnlearn:  # TODO add info logger
         grad_abs_sums: dict[str, torch.Tensor] = {}
         effective_steps = 0
 
+        if svdiff_uv_cfg.get("use_torchjd", False):
+            aggregator = UPGrad()
         try:
             self.model.train()
             self.optimizer.zero_grad(set_to_none=True)
@@ -381,11 +383,18 @@ class TrainerUnlearn:  # TODO add info logger
                         noise_scheduler=self.noise_scheduler,
                         forget=False,
                     )
-                    loss = retain_loss + forget_loss
+
+                    if not svdiff_uv_cfg.get("use_torchjd", False):
+                        loss = retain_loss + forget_loss
                 else:
                     raise ValueError(f"Unknown unlearning method for pre-grad logging: {unlearn_method}")
 
-                self.accelerator.backward(loss)
+                if not svdiff_uv_cfg.get("use_torchjd", False):
+                    self.accelerator.backward(loss)
+                else:
+                    trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+                    autojac.backward([retain_loss, forget_loss], inputs=trainable_params)
+                    jac_to_grad(trainable_params, aggregator)
 
                 has_delta_grad = False
                 for name, param in self.accelerator.unwrap_model(self.model).named_parameters():

@@ -201,14 +201,26 @@ class TrainerUnlearn:  # TODO add info logger
         wandb.define_metric("weight_stats/*", step_metric="weight_stats_step")
         wandb.define_metric("svdiff_uv_pre_grad_step")
         wandb.define_metric("svdiff_uv_pre_grad/*", step_metric="svdiff_uv_pre_grad_step")
+        wandb.define_metric("svdiff_uv_pre_grad_retain/*", step_metric="svdiff_uv_pre_grad_step")
+        wandb.define_metric("svdiff_uv_pre_grad_forget/*", step_metric="svdiff_uv_pre_grad_step")
 
     @staticmethod
     def _weight_stat_metric_prefix(name: str) -> str:
         return f"weight_stats/{name.replace('.', '/')}"
 
     @staticmethod
-    def _svdiff_uv_pre_grad_metric_prefix(index: int, variant: str) -> str:
-        return f"svdiff_uv_pre_grad/delta_{variant.lower()}_{index:03d}"
+    def _svdiff_uv_pre_grad_namespace(stream: str) -> str:
+        if stream == "combined":
+            return "svdiff_uv_pre_grad"
+        if stream == "retain":
+            return "svdiff_uv_pre_grad_retain"
+        if stream == "forget":
+            return "svdiff_uv_pre_grad_forget"
+        raise ValueError(f"Unknown svdiff_uv pre-grad stream: {stream!r}")
+
+    @classmethod
+    def _svdiff_uv_pre_grad_metric_prefix(cls, index: int, variant: str, stream: str = "combined") -> str:
+        return f"{cls._svdiff_uv_pre_grad_namespace(stream)}/delta_{variant.lower()}_{index:03d}"
 
     def _get_svdiff_uv_type(self) -> str | None:
         """Return the configured svdiff_uv variant ('u' or 'v'), or None if not enabled."""
@@ -247,6 +259,89 @@ class TrainerUnlearn:  # TODO add info logger
 
         return singular_values_by_param
 
+    @staticmethod
+    def _accumulate_delta_grads_from_loss(
+        loss: torch.Tensor,
+        delta_named_params: list[tuple[str, torch.nn.Parameter]],
+        sums_dict: dict[str, torch.Tensor],
+    ) -> bool:
+        """Compute grads of `loss` wrt each delta param and accumulate per-column mean |grad|.
+
+        Uses `torch.autograd.grad` with `retain_graph=True` and `allow_unused=True`, so the
+        computation graph is preserved for downstream backward calls and unrelated params are
+        tolerated. Returns True if at least one param received a non-None gradient.
+        """
+        if not loss.requires_grad or not delta_named_params:
+            return False
+        params = [p for _, p in delta_named_params]
+        try:
+            grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+        except RuntimeError:
+            return False
+
+        has_any = False
+        for (name, _), grad in zip(delta_named_params, grads):
+            if grad is None:
+                continue
+            grad = grad.detach()
+            if grad.ndim >= 2:
+                reduce_dims = tuple(range(grad.ndim - 1))
+                mean_abs_grad = grad.abs().mean(dim=reduce_dims)
+            else:
+                mean_abs_grad = grad.abs()
+            mean_abs_grad = mean_abs_grad.to(device="cpu", dtype=torch.float64)
+            if name not in sums_dict:
+                sums_dict[name] = torch.zeros_like(mean_abs_grad)
+            sums_dict[name] += mean_abs_grad
+            has_any = True
+        return has_any
+
+    def _emit_pre_grad_stream_metrics(
+        self,
+        metrics: dict,
+        sums_dict: dict[str, torch.Tensor],
+        steps: int,
+        stream: str,
+        variant: str,
+        singular_values_by_param: dict[str, torch.Tensor],
+        label: str,
+    ) -> None:
+        """Populate `metrics` with per-column mean |grad| curves for a single stream."""
+        if steps <= 0 or not sums_dict:
+            return
+        namespace = self._svdiff_uv_pre_grad_namespace(stream)
+        metrics[f"{namespace}/num_effective_steps"] = float(steps)
+        metrics[f"{namespace}/variant"] = variant
+        sorted_items = sorted(sums_dict.items(), key=lambda x: x[0])
+        for index, (name, grad_abs_sum) in enumerate(sorted_items):
+            mean_grad = grad_abs_sum / steps
+            metric_prefix = self._svdiff_uv_pre_grad_metric_prefix(index, variant, stream)
+            metrics[f"{metric_prefix}/mean"] = mean_grad.mean().item()
+            if self.logger == "wandb":
+                metrics[f"{metric_prefix}/per_column_curve"] = wandb.plot.line_series(
+                    xs=list(range(mean_grad.numel())),
+                    ys=[mean_grad.cpu().tolist()],
+                    keys=["avg_grad_magnitude"],
+                    title=f"{name} [{stream}] per-column average |grad|",
+                    xname="column_index",
+                )
+                singular_values = singular_values_by_param.get(name)
+                if singular_values is not None:
+                    n_cols = min(mean_grad.numel(), singular_values.numel())
+                    normalized_grad = mean_grad[:n_cols] / singular_values[:n_cols].abs().clamp_min(1e-12)
+                    metrics[f"{metric_prefix}/mean_normalized_by_s"] = normalized_grad.mean().item()
+                    metrics[f"{metric_prefix}/per_column_curve_normalized_by_s"] = wandb.plot.line_series(
+                        xs=list(range(n_cols)),
+                        ys=[normalized_grad.cpu().tolist()],
+                        keys=["avg_grad_over_s"],
+                        title=f"{name} [{stream}] per-column average |grad| / (S + eps)",
+                        xname="column_index",
+                    )
+        print(
+            f"{label} logged {stream} per-column mean |grad| for {len(sums_dict)} "
+            f"{self._svdiff_uv_delta_param_name(variant)} tensors over {steps} steps."
+        )
+
     def _run_svdiff_uv_pre_grad_logging(
         self,
         train_dataset: Dataset,
@@ -269,6 +364,14 @@ class TrainerUnlearn:  # TODO add info logger
         label = f"SVDiff-{variant.upper()}"
         print(f"Running {label} pre-grad logging for {pre_grad_steps} steps (method={unlearn_method})")
 
+        log_separately = svdiff_uv_cfg.get("pre_grad_log_forget_retain_separately", False)
+        if log_separately and svdiff_uv_cfg.get("use_torchjd", False):
+            print(
+                f"{label} pre-grad per-loss logging is not supported when svdiff_uv.use_torchjd is True; "
+                "ignoring pre_grad_log_forget_retain_separately."
+            )
+            log_separately = False
+
         pre_dataloader = self.create_dataloader(
             train_dataset, num_workers=num_workers, resumable_with_seed=resumable_with_seed
         )
@@ -279,7 +382,24 @@ class TrainerUnlearn:  # TODO add info logger
         cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
 
         grad_abs_sums: dict[str, torch.Tensor] = {}
+        grad_abs_sums_retain: dict[str, torch.Tensor] = {}
+        grad_abs_sums_forget: dict[str, torch.Tensor] = {}
         effective_steps = 0
+        effective_steps_retain = 0
+        effective_steps_forget = 0
+
+        delta_named_params: list[tuple[str, torch.nn.Parameter]] = []
+        if log_separately:
+            delta_named_params = [
+                (n, p)
+                for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
+                if delta_param_name in n and p.requires_grad
+            ]
+            if not delta_named_params:
+                print(
+                    f"{label} pre-grad per-loss logging disabled: " f"no trainable {delta_param_name} parameters found."
+                )
+                log_separately = False
 
         if svdiff_uv_cfg.get("use_torchjd", False):
             aggregator = UPGrad()
@@ -389,6 +509,12 @@ class TrainerUnlearn:  # TODO add info logger
                 else:
                     raise ValueError(f"Unknown unlearning method for pre-grad logging: {unlearn_method}")
 
+                if log_separately:
+                    if self._accumulate_delta_grads_from_loss(retain_loss, delta_named_params, grad_abs_sums_retain):
+                        effective_steps_retain += 1
+                    if self._accumulate_delta_grads_from_loss(forget_loss, delta_named_params, grad_abs_sums_forget):
+                        effective_steps_forget += 1
+
                 if not svdiff_uv_cfg.get("use_torchjd", False):
                     self.accelerator.backward(loss)
                 else:
@@ -475,6 +601,30 @@ class TrainerUnlearn:  # TODO add info logger
                 f"for {len(grad_abs_sums)} {delta_param_name} tensors "
                 f"over {effective_steps} steps."
             )
+
+            if log_separately:
+                stream_metrics: dict = {"svdiff_uv_pre_grad_step": 1}
+                self._emit_pre_grad_stream_metrics(
+                    stream_metrics,
+                    grad_abs_sums_retain,
+                    effective_steps_retain,
+                    stream="retain",
+                    variant=variant,
+                    singular_values_by_param=singular_values_by_param,
+                    label=label,
+                )
+                self._emit_pre_grad_stream_metrics(
+                    stream_metrics,
+                    grad_abs_sums_forget,
+                    effective_steps_forget,
+                    stream="forget",
+                    variant=variant,
+                    singular_values_by_param=singular_values_by_param,
+                    label=label,
+                )
+                # Only log if at least one stream produced content beyond the step key
+                if len(stream_metrics) > 1:
+                    self.accelerator.log(stream_metrics, step=0)
 
         # Return per-parameter mean gradient magnitudes for downstream top-k selection
         grad_means: dict[str, torch.Tensor] = {}

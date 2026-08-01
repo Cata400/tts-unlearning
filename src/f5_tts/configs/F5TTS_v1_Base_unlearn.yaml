@@ -61,7 +61,8 @@ model:
       type: u # u | v: which SVD factor to delta-fine-tune (U columns or V columns before the transpose)
       pre_grad_enabled: True # run pre-optimization gradient profiling before training
       pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta tensor
-      pre_grad_top_k: 10 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
+      pre_grad_top_k: 32 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
+      pre_grad_log_forget_retain_separately: False # additionally log mean |grad| streams for retain and forget losses separately (top-k still uses combined grads); ignored when use_torchjd is True
       use_torchjd: False # default False, whether to use torchjd for gradient computation
 
 ckpts:

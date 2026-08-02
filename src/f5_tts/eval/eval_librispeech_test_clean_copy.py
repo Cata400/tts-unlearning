@@ -4,10 +4,7 @@ import argparse
 import ast
 import json
 import os
-import random
 import sys
-
-import torch
 
 sys.path.append(os.getcwd())
 
@@ -21,6 +18,7 @@ from f5_tts.eval.utils_eval import (
     run_sim_v2,
     run_spk_ZRF_pipeline_librispeech,
 )
+from f5_tts.model.utils import seed_everything
 
 rel_path = str(files("f5_tts").joinpath("../../"))
 
@@ -86,9 +84,7 @@ def get_speaker_avg_results(full_results, metric_key):
 def main():
     args = get_args()
     seed = args.seed
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    seed_everything(seed)
 
     eval_task = args.eval_task
     lang = args.lang

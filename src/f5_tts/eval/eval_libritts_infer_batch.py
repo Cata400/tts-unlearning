@@ -1,9 +1,6 @@
 import os
-import random
 import sys
 from pathlib import Path
-
-import numpy as np
 
 sys.path.append(os.getcwd())
 
@@ -24,7 +21,7 @@ from f5_tts.eval.utils_eval import (
 )
 from f5_tts.infer.utils_infer import load_checkpoint, load_vocoder
 from f5_tts.model import CFM
-from f5_tts.model.utils import get_tokenizer
+from f5_tts.model.utils import get_tokenizer, seed_everything
 
 accelerator = Accelerator()
 device = f"cuda:{accelerator.process_index}"
@@ -88,9 +85,7 @@ def main():
     use_truth_duration = False
     no_ref_audio = False
 
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    seed_everything(seed)
 
     model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/{exp_name}.yaml")))
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")

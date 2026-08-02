@@ -4,7 +4,6 @@ import argparse
 import ast
 import json
 import os
-import random
 import sys
 import warnings
 from importlib.resources import files
@@ -23,6 +22,7 @@ from f5_tts.eval.utils_eval import (
     run_spk_ZRF_pipeline_libritts,
     run_utmosv2,
 )
+from f5_tts.model.utils import seed_everything
 
 sys.path.append(os.getcwd())
 warnings.filterwarnings("ignore")
@@ -134,9 +134,7 @@ def get_retain_forget_avg_results(speaker_avg_results, metric_key, forget_speake
 def main():
     args = get_args()
     seed = args.seed
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    seed_everything(seed)
 
     eval_task = args.eval_task
     lang = args.lang

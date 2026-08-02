@@ -946,6 +946,17 @@ class TrainerUnlearn:  # TODO add info logger
         else:
             generator = None
 
+        def worker_init_fn(worker_id):
+            if resumable_with_seed is not None:
+                worker_seed = resumable_with_seed + worker_id
+                import random
+
+                import numpy as np
+
+                random.seed(worker_seed)
+                np.random.seed(worker_seed)
+                torch.manual_seed(worker_seed)
+
         if self.batch_size_type == "sample":
             train_dataloader = DataLoader(
                 train_dataset,
@@ -956,6 +967,7 @@ class TrainerUnlearn:  # TODO add info logger
                 batch_size=self.batch_size_per_gpu,
                 shuffle=True,
                 generator=generator,
+                worker_init_fn=worker_init_fn,
             )
         elif (
             self.batch_size_type == "unlearn_sample"
@@ -973,6 +985,7 @@ class TrainerUnlearn:  # TODO add info logger
                 unlearning_sample_weights,
                 num_samples=len(unlearning_sample_weights),
                 replacement=True,
+                generator=generator,
             )
             train_dataloader = DataLoader(
                 train_dataset,
@@ -983,6 +996,7 @@ class TrainerUnlearn:  # TODO add info logger
                 batch_size=self.batch_size_per_gpu,
                 sampler=sampler,
                 generator=generator,
+                worker_init_fn=worker_init_fn,
             )
         elif self.batch_size_type == "balanced_unlearn_sample":
             batch_sampler = BalancedUnlearningSampleBatchSampler(
@@ -1003,6 +1017,7 @@ class TrainerUnlearn:  # TODO add info logger
                 pin_memory=True,
                 persistent_workers=True,
                 batch_sampler=batch_sampler,
+                worker_init_fn=worker_init_fn,
             )
         elif self.batch_size_type == "frame":
             self.accelerator.even_batches = False
@@ -1021,6 +1036,7 @@ class TrainerUnlearn:  # TODO add info logger
                 pin_memory=True,
                 persistent_workers=True,
                 batch_sampler=batch_sampler,
+                worker_init_fn=worker_init_fn,
             )
             print(f"Total {len(train_dataloader)} batches per epoch with frame-based batch size.")
         elif self.batch_size_type == "unlearn_frame":
@@ -1040,6 +1056,7 @@ class TrainerUnlearn:  # TODO add info logger
                 pin_memory=True,
                 persistent_workers=True,
                 batch_sampler=batch_sampler,
+                worker_init_fn=worker_init_fn,
             )
             print(f"Total {len(train_dataloader)} batches per epoch with frame-based batch size.")
         else:

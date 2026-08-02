@@ -1,20 +1,17 @@
 # training script.
 
 import os
-import random
 
 # supress warnings
 import warnings
 from importlib.resources import files
 
 import hydra
-import numpy as np
-import torch
 from omegaconf import OmegaConf
 
 from f5_tts.model import CFM, TrainerUnlearn
 from f5_tts.model.dataset import load_dataset
-from f5_tts.model.utils import get_tokenizer
+from f5_tts.model.utils import get_tokenizer, seed_everything
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -23,9 +20,7 @@ os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to 
 
 @hydra.main(version_base="1.3", config_path=str(files("f5_tts").joinpath("configs")), config_name=None)
 def main(model_cfg):
-    random.seed(model_cfg.unlearn.random_seed)
-    torch.manual_seed(model_cfg.unlearn.random_seed)
-    np.random.seed(model_cfg.unlearn.random_seed)
+    seed_everything(model_cfg.unlearn.random_seed)
 
     # Check unlearn methods
     unlearn_methods_use = [params.use for _, params in model_cfg.unlearn.unlearn_methods.items()]

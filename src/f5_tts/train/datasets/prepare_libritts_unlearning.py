@@ -100,7 +100,8 @@ if __name__ == "__main__":
 
     # SUB_SET = ["train-clean-100", "train-clean-360", "train-other-500"]
     SUB_SET = ["train-clean-100_train_intra_speaker_split_0.2"]
-    dataset_dir = "/home/catalin/Desktop/Datasets/LibriTTS"
+    # dataset_dir = "/home/catalin/Desktop/Datasets/LibriTTS"
+    dataset_dir = "/alpha/catalin.ciocirlan/Datasets/LibriTTS"
     dataset_name = f"LibriTTS_{'_'.join(SUB_SET)}_{tokenizer}".replace("train-clean-", "").replace("train-other-", "")
 
     save_dir = str(files("f5_tts").joinpath("../../")) + f"/data/{dataset_name}"

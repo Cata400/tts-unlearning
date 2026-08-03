@@ -5,7 +5,6 @@ import math
 import os
 
 import torch
-import torch.nn.utils.parametrize as parametrize
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from ema_pytorch import EMA
@@ -37,11 +36,7 @@ from f5_tts.model.dataset import (
     collate_fn_unlearning,
     get_dataset_num_speakers,
 )
-from f5_tts.model.modules import (
-    SVDParametrization,
-    SVDParametrizationU,
-    SVDParametrizationV,
-)
+from f5_tts.model.finetune_strategies import build_finetune_strategy
 from f5_tts.model.utils import default, exists
 
 
@@ -92,6 +87,8 @@ class TrainerUnlearn:  # TODO add info logger
             gradient_accumulation_steps=grad_accumulation_steps,
             **accelerate_kwargs,
         )
+
+        self.finetune_strategy = build_finetune_strategy(model_cfg_dict)
 
         self.logger = logger
         if self.logger == "wandb":
@@ -199,488 +196,11 @@ class TrainerUnlearn:  # TODO add info logger
         wandb.define_metric("lr", step_metric="train_step")
         wandb.define_metric("weight_stats_step")
         wandb.define_metric("weight_stats/*", step_metric="weight_stats_step")
-        wandb.define_metric("svdiff_uv_pre_grad_step")
-        wandb.define_metric("svdiff_uv_pre_grad/*", step_metric="svdiff_uv_pre_grad_step")
-        wandb.define_metric("svdiff_uv_pre_grad_retain/*", step_metric="svdiff_uv_pre_grad_step")
-        wandb.define_metric("svdiff_uv_pre_grad_forget/*", step_metric="svdiff_uv_pre_grad_step")
+        self.finetune_strategy.register_wandb_metrics(self.logger)
 
     @staticmethod
     def _weight_stat_metric_prefix(name: str) -> str:
         return f"weight_stats/{name.replace('.', '/')}"
-
-    @staticmethod
-    def _svdiff_uv_pre_grad_namespace(stream: str) -> str:
-        if stream == "combined":
-            return "svdiff_uv_pre_grad"
-        if stream == "retain":
-            return "svdiff_uv_pre_grad_retain"
-        if stream == "forget":
-            return "svdiff_uv_pre_grad_forget"
-        raise ValueError(f"Unknown svdiff_uv pre-grad stream: {stream!r}")
-
-    @classmethod
-    def _svdiff_uv_pre_grad_metric_prefix(cls, index: int, variant: str, stream: str = "combined") -> str:
-        return f"{cls._svdiff_uv_pre_grad_namespace(stream)}/delta_{variant.lower()}_{index:03d}"
-
-    def _get_svdiff_uv_type(self) -> str | None:
-        """Return the configured svdiff_uv variant ('u' or 'v'), or None if not enabled."""
-        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
-        if not svdiff_uv_cfg.get("use", False):
-            return None
-        variant = str(svdiff_uv_cfg.get("type", "u")).lower()
-        if variant not in ("u", "v"):
-            raise ValueError(f"svdiff_uv.type must be 'u' or 'v', got: {variant!r}")
-        return variant
-
-    @staticmethod
-    def _svdiff_uv_delta_param_name(variant: str) -> str:
-        return "delta_U" if variant == "u" else "delta_V"
-
-    def _get_svdiff_uv_singular_values_by_param_name(self, variant: str) -> dict[str, torch.Tensor]:
-        delta_attr = self._svdiff_uv_delta_param_name(variant)
-        singular_values_by_param: dict[str, torch.Tensor] = {}
-        for module_name, module in self.accelerator.unwrap_model(self.model).named_modules():
-            if not hasattr(module, "parametrizations") or "weight" not in module.parametrizations:
-                continue
-
-            parametrizations = module.parametrizations["weight"]
-            if len(parametrizations) == 0:
-                continue
-            parametrization = parametrizations[0]
-            if not (hasattr(parametrization, delta_attr) and hasattr(parametrization, "S")):
-                continue
-
-            param_name = (
-                f"{module_name}.parametrizations.weight.0.{delta_attr}"
-                if module_name
-                else f"parametrizations.weight.0.{delta_attr}"
-            )
-            singular_values_by_param[param_name] = parametrization.S.detach().to(device="cpu", dtype=torch.float64)
-
-        return singular_values_by_param
-
-    @staticmethod
-    def _accumulate_delta_grads_from_loss(
-        loss: torch.Tensor,
-        delta_named_params: list[tuple[str, torch.nn.Parameter]],
-        sums_dict: dict[str, torch.Tensor],
-    ) -> bool:
-        """Compute grads of `loss` wrt each delta param and accumulate per-column mean |grad|.
-
-        Uses `torch.autograd.grad` with `retain_graph=True` and `allow_unused=True`, so the
-        computation graph is preserved for downstream backward calls and unrelated params are
-        tolerated. Returns True if at least one param received a non-None gradient.
-        """
-        if not loss.requires_grad or not delta_named_params:
-            return False
-        params = [p for _, p in delta_named_params]
-        try:
-            grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
-        except RuntimeError:
-            return False
-
-        has_any = False
-        for (name, _), grad in zip(delta_named_params, grads):
-            if grad is None:
-                continue
-            grad = grad.detach()
-            if grad.ndim >= 2:
-                reduce_dims = tuple(range(grad.ndim - 1))
-                mean_abs_grad = grad.abs().mean(dim=reduce_dims)
-            else:
-                mean_abs_grad = grad.abs()
-            mean_abs_grad = mean_abs_grad.to(device="cpu", dtype=torch.float64)
-            if name not in sums_dict:
-                sums_dict[name] = torch.zeros_like(mean_abs_grad)
-            sums_dict[name] += mean_abs_grad
-            has_any = True
-        return has_any
-
-    def _emit_pre_grad_stream_metrics(
-        self,
-        metrics: dict,
-        sums_dict: dict[str, torch.Tensor],
-        steps: int,
-        stream: str,
-        variant: str,
-        singular_values_by_param: dict[str, torch.Tensor],
-        label: str,
-    ) -> None:
-        """Populate `metrics` with per-column mean |grad| curves for a single stream."""
-        if steps <= 0 or not sums_dict:
-            return
-        namespace = self._svdiff_uv_pre_grad_namespace(stream)
-        metrics[f"{namespace}/num_effective_steps"] = float(steps)
-        metrics[f"{namespace}/variant"] = variant
-        sorted_items = sorted(sums_dict.items(), key=lambda x: x[0])
-        for index, (name, grad_abs_sum) in enumerate(sorted_items):
-            mean_grad = grad_abs_sum / steps
-            metric_prefix = self._svdiff_uv_pre_grad_metric_prefix(index, variant, stream)
-            metrics[f"{metric_prefix}/mean"] = mean_grad.mean().item()
-            if self.logger == "wandb":
-                metrics[f"{metric_prefix}/per_column_curve"] = wandb.plot.line_series(
-                    xs=list(range(mean_grad.numel())),
-                    ys=[mean_grad.cpu().tolist()],
-                    keys=["avg_grad_magnitude"],
-                    title=f"{name} [{stream}] per-column average |grad|",
-                    xname="column_index",
-                )
-                singular_values = singular_values_by_param.get(name)
-                if singular_values is not None:
-                    n_cols = min(mean_grad.numel(), singular_values.numel())
-                    normalized_grad = mean_grad[:n_cols] / singular_values[:n_cols].abs().clamp_min(1e-12)
-                    metrics[f"{metric_prefix}/mean_normalized_by_s"] = normalized_grad.mean().item()
-                    metrics[f"{metric_prefix}/per_column_curve_normalized_by_s"] = wandb.plot.line_series(
-                        xs=list(range(n_cols)),
-                        ys=[normalized_grad.cpu().tolist()],
-                        keys=["avg_grad_over_s"],
-                        title=f"{name} [{stream}] per-column average |grad| / (S + eps)",
-                        xname="column_index",
-                    )
-        print(
-            f"{label} logged {stream} per-column mean |grad| for {len(sums_dict)} "
-            f"{self._svdiff_uv_delta_param_name(variant)} tensors over {steps} steps."
-        )
-
-    def _run_svdiff_uv_pre_grad_logging(
-        self,
-        train_dataset: Dataset,
-        num_workers: int,
-        resumable_with_seed: int | None,
-        unlearn_method: str,
-    ) -> dict[str, torch.Tensor] | None:
-        if self._get_svdiff_variant() != "svdiff_uv":
-            return None
-
-        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
-        pre_grad_enabled = svdiff_uv_cfg.get("pre_grad_enabled", False)
-        pre_grad_steps = int(svdiff_uv_cfg.get("pre_grad_steps", 0))
-
-        if not pre_grad_enabled or pre_grad_steps <= 0:
-            return None
-
-        variant = self._get_svdiff_uv_type()
-        delta_param_name = self._svdiff_uv_delta_param_name(variant)
-        label = f"SVDiff-{variant.upper()}"
-        print(f"Running {label} pre-grad logging for {pre_grad_steps} steps (method={unlearn_method})")
-
-        log_separately = svdiff_uv_cfg.get("pre_grad_log_forget_retain_separately", False)
-        if log_separately and svdiff_uv_cfg.get("use_torchjd", False):
-            print(
-                f"{label} pre-grad per-loss logging is not supported when svdiff_uv.use_torchjd is True; "
-                "ignoring pre_grad_log_forget_retain_separately."
-            )
-            log_separately = False
-
-        pre_dataloader = self.create_dataloader(
-            train_dataset, num_workers=num_workers, resumable_with_seed=resumable_with_seed
-        )
-        pre_dataloader = self.accelerator.prepare(pre_dataloader)
-
-        was_training = self.model.training
-        cpu_rng_state = torch.get_rng_state()
-        cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-
-        grad_abs_sums: dict[str, torch.Tensor] = {}
-        grad_abs_sums_retain: dict[str, torch.Tensor] = {}
-        grad_abs_sums_forget: dict[str, torch.Tensor] = {}
-        effective_steps = 0
-        effective_steps_retain = 0
-        effective_steps_forget = 0
-
-        delta_named_params: list[tuple[str, torch.nn.Parameter]] = []
-        if log_separately:
-            delta_named_params = [
-                (n, p)
-                for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
-                if delta_param_name in n and p.requires_grad
-            ]
-            if not delta_named_params:
-                print(
-                    f"{label} pre-grad per-loss logging disabled: " f"no trainable {delta_param_name} parameters found."
-                )
-                log_separately = False
-
-        if svdiff_uv_cfg.get("use_torchjd", False):
-            aggregator = UPGrad()
-        try:
-            self.model.train()
-            self.optimizer.zero_grad(set_to_none=True)
-            pre_iter = iter(pre_dataloader)
-
-            for _ in range(pre_grad_steps):
-                try:
-                    batch = next(pre_iter)
-                except StopIteration:
-                    break
-
-                if unlearn_method == "TGU":
-                    text_inputs_retain = batch["text_retain"]
-                    text_inputs_forget = batch["text_forget"]
-                    mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
-                    mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
-                    mel_lengths_retain = batch["mel_lengths_retain"]
-                    mel_lengths_forget = batch["mel_lengths_forget"]
-
-                    if mel_spec_retain.numel() > 0:
-                        retain_loss, _, _ = self.model.forward_unlearn(
-                            mel_spec_retain,
-                            text=text_inputs_retain,
-                            lens=mel_lengths_retain,
-                            noise_scheduler=self.noise_scheduler,
-                            forget=False,
-                        )
-                    else:
-                        retain_loss = torch.tensor(0.0, device=self.accelerator.device)
-
-                    if mel_spec_forget.numel() > 0:
-                        infer_texts_forget = [
-                            text_inputs_forget[i]
-                            + ([" "] if isinstance(text_inputs_forget[i], list) else " ")
-                            + text_inputs_forget[i]
-                            for i in range(len(text_inputs_forget))
-                        ]
-                        with torch.inference_mode():
-                            unconditioned_mel_spec_forget, _ = self.accelerator.unwrap_model(self.teacher).sample(
-                                cond=torch.zeros_like(mel_spec_forget),
-                                text=infer_texts_forget,
-                                duration=mel_spec_forget.size(1) * 2,
-                                max_duration=mel_spec_forget.size(1) * 2,
-                                no_ref_audio=True,
-                                steps=nfe_step,
-                                cfg_strength=cfg_strength,
-                                sway_sampling_coef=sway_sampling_coef,
-                            )
-                            unconditioned_mel_spec_forget = unconditioned_mel_spec_forget.to(torch.float32)
-                            unconditioned_mel_spec_forget = unconditioned_mel_spec_forget[
-                                :, mel_spec_forget.size(1) :
-                            ].to(self.accelerator.device)
-
-                        forget_loss, _, _ = self.model.forward_unlearn(
-                            mel_spec_forget,
-                            text=text_inputs_forget,
-                            lens=mel_lengths_forget,
-                            noise_scheduler=self.noise_scheduler,
-                            forget=True,
-                            flow_inp=unconditioned_mel_spec_forget,
-                        )
-                    else:
-                        forget_loss = torch.tensor(0.0, device=self.accelerator.device)
-
-                    loss = (
-                        self.unlearn_params["lambda"] * retain_loss + (1 - self.unlearn_params["lambda"]) * forget_loss
-                    )
-
-                elif unlearn_method == "SGU":
-                    text_inputs_retain = batch["text_retain"]
-                    text_inputs_forget = batch["text_forget"]
-                    mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
-                    mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
-                    mel_lengths_retain = batch["mel_lengths_retain"]
-                    mel_lengths_forget = batch["mel_lengths_forget"]
-
-                    if mel_spec_forget.numel() > 0:  # if there is at least one forget sample
-                        mel_spec_concat = torch.cat([mel_spec_forget, mel_spec_retain], dim=1)
-                        text_inputs_concat = [
-                            text_inputs_forget[i] + " " + text_inputs_retain[i] for i in range(len(text_inputs_retain))
-                        ]
-                        mel_lengths_concat = mel_lengths_forget + mel_lengths_retain
-
-                        forget_loss, forget_cond, forget_pred = self.model.forward_unlearn_SGU(
-                            mel_spec_concat,
-                            text=text_inputs_concat,
-                            lens=mel_lengths_concat,
-                            retain_lens=mel_lengths_retain,
-                            noise_scheduler=self.noise_scheduler,
-                        )
-                    else:
-                        forget_loss = torch.tensor(0.0, device=self.accelerator.device)
-
-                    retain_loss, retain_cond, retain_pred = self.model.forward_unlearn(
-                        mel_spec_retain,
-                        text=text_inputs_retain,
-                        lens=mel_lengths_retain,
-                        noise_scheduler=self.noise_scheduler,
-                        forget=False,
-                    )
-
-                    if not svdiff_uv_cfg.get("use_torchjd", False):
-                        loss = retain_loss + forget_loss
-                else:
-                    raise ValueError(f"Unknown unlearning method for pre-grad logging: {unlearn_method}")
-
-                if log_separately:
-                    if self._accumulate_delta_grads_from_loss(retain_loss, delta_named_params, grad_abs_sums_retain):
-                        effective_steps_retain += 1
-                    if self._accumulate_delta_grads_from_loss(forget_loss, delta_named_params, grad_abs_sums_forget):
-                        effective_steps_forget += 1
-
-                if not svdiff_uv_cfg.get("use_torchjd", False):
-                    self.accelerator.backward(loss)
-                else:
-                    trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-                    autojac.backward([retain_loss, forget_loss], inputs=trainable_params)
-                    jac_to_grad(trainable_params, aggregator)
-
-                has_delta_grad = False
-                for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
-                    if delta_param_name not in name or param.grad is None:
-                        continue
-
-                    grad = param.grad.detach()
-                    if grad.ndim >= 2:
-                        reduce_dims = tuple(range(grad.ndim - 1))
-                        mean_abs_grad = grad.abs().mean(dim=reduce_dims)
-                    else:
-                        mean_abs_grad = grad.abs()
-
-                    mean_abs_grad = mean_abs_grad.to(device="cpu", dtype=torch.float64)
-                    if name not in grad_abs_sums:
-                        grad_abs_sums[name] = torch.zeros_like(mean_abs_grad)
-                    grad_abs_sums[name] += mean_abs_grad
-                    has_delta_grad = True
-
-                if has_delta_grad:
-                    effective_steps += 1
-
-                self.optimizer.zero_grad(set_to_none=True)
-        finally:
-            self.optimizer.zero_grad(set_to_none=True)
-            torch.set_rng_state(cpu_rng_state)
-            if cuda_rng_state is not None:
-                torch.cuda.set_rng_state_all(cuda_rng_state)
-            if was_training:
-                self.model.train()
-            else:
-                self.model.eval()
-
-        if effective_steps == 0:
-            print(f"{label} pre-grad logging skipped: no {delta_param_name} gradients were collected.")
-            return None
-
-        if self.accelerator.is_local_main_process:
-            metrics = {
-                "svdiff_uv_pre_grad_step": 1,
-                "svdiff_uv_pre_grad/num_effective_steps": float(effective_steps),
-                "svdiff_uv_pre_grad/variant": variant,
-            }
-            singular_values_by_param = self._get_svdiff_uv_singular_values_by_param_name(variant)
-            sorted_grad_items = sorted(grad_abs_sums.items(), key=lambda x: x[0])
-            for index, (name, grad_abs_sum) in enumerate(sorted_grad_items):
-                mean_grad = grad_abs_sum / effective_steps
-                metric_prefix = self._svdiff_uv_pre_grad_metric_prefix(index, variant)
-                metrics[f"{metric_prefix}/mean"] = mean_grad.mean().item()
-                if self.logger == "wandb":
-                    x_vals = list(range(mean_grad.numel()))
-                    y_vals = mean_grad.cpu().tolist()
-                    metrics[f"{metric_prefix}/per_column_curve"] = wandb.plot.line_series(
-                        xs=x_vals,
-                        ys=[y_vals],
-                        keys=["avg_grad_magnitude"],
-                        title=f"{name} per-column average |grad|",
-                        xname="column_index",
-                    )
-
-                    singular_values = singular_values_by_param.get(name)
-                    if singular_values is not None:
-                        n_cols = min(mean_grad.numel(), singular_values.numel())
-                        normalized_grad = mean_grad[:n_cols] / singular_values[:n_cols].abs().clamp_min(1e-12)
-                        metrics[f"{metric_prefix}/mean_normalized_by_s"] = normalized_grad.mean().item()
-                        metrics[f"{metric_prefix}/per_column_curve_normalized_by_s"] = wandb.plot.line_series(
-                            xs=list(range(n_cols)),
-                            ys=[normalized_grad.cpu().tolist()],
-                            keys=["avg_grad_over_s"],
-                            title=f"{name} per-column average |grad| / (S + eps)",
-                            xname="column_index",
-                        )
-                print(f"{label} metric mapping: delta_{variant}_{index:03d} -> {name}")
-
-            self.accelerator.log(metrics, step=0)
-            print(
-                f"Logged {label} per-column mean |grad| as one graph per {delta_param_name} tensor "
-                f"for {len(grad_abs_sums)} {delta_param_name} tensors "
-                f"over {effective_steps} steps."
-            )
-
-            if log_separately:
-                stream_metrics: dict = {"svdiff_uv_pre_grad_step": 1}
-                self._emit_pre_grad_stream_metrics(
-                    stream_metrics,
-                    grad_abs_sums_retain,
-                    effective_steps_retain,
-                    stream="retain",
-                    variant=variant,
-                    singular_values_by_param=singular_values_by_param,
-                    label=label,
-                )
-                self._emit_pre_grad_stream_metrics(
-                    stream_metrics,
-                    grad_abs_sums_forget,
-                    effective_steps_forget,
-                    stream="forget",
-                    variant=variant,
-                    singular_values_by_param=singular_values_by_param,
-                    label=label,
-                )
-                # Only log if at least one stream produced content beyond the step key
-                if len(stream_metrics) > 1:
-                    self.accelerator.log(stream_metrics, step=0)
-
-        # Return per-parameter mean gradient magnitudes for downstream top-k selection
-        grad_means: dict[str, torch.Tensor] = {}
-        for name, grad_abs_sum in grad_abs_sums.items():
-            grad_means[name] = grad_abs_sum / effective_steps
-        return grad_means
-
-    def _apply_svdiff_uv_top_k_column_mask(self, grad_means: dict[str, torch.Tensor], top_k: int, variant: str) -> int:
-        """Register gradient hooks on delta parameters to zero out non-top-k columns.
-
-        Works for both delta_U (shape (m, k)) and delta_V (shape (n, k)).
-
-        Returns the effective number of trainable elements across all masked delta params.
-        """
-        delta_param_name = self._svdiff_uv_delta_param_name(variant)
-        label = f"SVDiff-{variant.upper()}"
-        print(f"Applying {label} top-k column mask: keeping {top_k} columns per {delta_param_name}")
-
-        effective_delta_elements = 0
-        total_delta_elements = 0
-
-        for name, param in self.accelerator.unwrap_model(self.model).named_parameters():
-            if delta_param_name not in name or name not in grad_means:
-                continue
-
-            mean_grad = grad_means[name]  # shape: (num_columns,)
-            num_columns = mean_grad.numel()
-            k = min(top_k, num_columns)
-
-            _, top_indices = torch.topk(mean_grad, k=k)
-            mask = torch.zeros(num_columns, device=param.device, dtype=param.dtype)
-            mask[top_indices] = 1.0
-
-            # Expand mask to match delta shape (rows, columns) -> broadcast across rows
-            if param.ndim == 2:
-                column_mask = mask.unsqueeze(0)  # (1, num_columns)
-                rows = param.shape[0]
-            else:
-                column_mask = mask
-                rows = 1
-
-            param.register_hook(lambda grad, m=column_mask: grad * m)
-
-            effective_delta_elements += rows * k
-            total_delta_elements += param.numel()
-
-            print(
-                f"  {name}: kept {k}/{num_columns} columns "
-                f"(indices: {sorted(top_indices.cpu().tolist())[:10]}{'...' if k > 10 else ''})"
-            )
-
-        print(
-            f"  Effective {delta_param_name} elements: {effective_delta_elements:,} / {total_delta_elements:,} "
-            f"({100 * effective_delta_elements / max(total_delta_elements, 1):.1f}%)"
-        )
-        return effective_delta_elements
 
     def _get_lr_schedule_updates(self, train_dataloader: DataLoader):
         # accelerator.prepare() dispatches batches to devices;
@@ -718,32 +238,6 @@ class TrainerUnlearn:  # TODO add info logger
 
         self.scheduler = self._build_lr_scheduler(warmup_updates, decay_updates)
         self.optimizer, self.scheduler = self.accelerator.prepare(self.optimizer, self.scheduler)
-
-    def reset_optimizer_and_scheduler_after_svdiff(self, warmup_updates: int, decay_updates: int):
-        self.reset_optimizer_and_scheduler_for_trainable_params(warmup_updates, decay_updates, context="SVDiff")
-
-    def _get_svdiff_variant(self):
-        finetune_cfg = self.model_cfg_dict["model"].get("finetune", {})
-        svdiff = finetune_cfg.get("svdiff", {}).get("use", False)
-        svdiff_uv = finetune_cfg.get("svdiff_uv", {}).get("use", False)
-        if svdiff and svdiff_uv:
-            raise ValueError("Only one of svdiff or svdiff_uv can be enabled at a time.")
-        if svdiff:
-            return "svdiff"
-        if svdiff_uv:
-            return "svdiff_uv"
-        return None
-
-    def _prepare_model_for_svdiff_variant(self, warmup_updates: int, decay_updates: int):
-        svdiff_variant = self._get_svdiff_variant()
-        if svdiff_variant == "svdiff":
-            self.prepare_model_for_svdiff()
-        elif svdiff_variant == "svdiff_uv":
-            self.prepare_model_for_svdiff_uv()
-        else:
-            return
-
-        self.reset_optimizer_and_scheduler_after_svdiff(warmup_updates, decay_updates)
 
     def save_checkpoint(self, update, last=False):
         self.accelerator.wait_for_everyone()
@@ -1068,6 +562,92 @@ class TrainerUnlearn:  # TODO add info logger
 
         return train_dataloader
 
+    def _compute_pre_grad_losses(self, batch, unlearn_method: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute (retain_loss, forget_loss) for one profiling batch (used by fine-tune pre-grad hooks)."""
+        text_inputs_retain = batch["text_retain"]
+        text_inputs_forget = batch["text_forget"]
+        mel_spec_retain = batch["mel_retain"].permute(0, 2, 1)
+        mel_spec_forget = batch["mel_forget"].permute(0, 2, 1)
+        mel_lengths_retain = batch["mel_lengths_retain"]
+        mel_lengths_forget = batch["mel_lengths_forget"]
+
+        if unlearn_method == "TGU":
+            if mel_spec_retain.numel() > 0:
+                retain_loss, _, _ = self.model.forward_unlearn(
+                    mel_spec_retain,
+                    text=text_inputs_retain,
+                    lens=mel_lengths_retain,
+                    noise_scheduler=self.noise_scheduler,
+                    forget=False,
+                )
+            else:
+                retain_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+            if mel_spec_forget.numel() > 0:
+                infer_texts_forget = [
+                    text_inputs_forget[i]
+                    + ([" "] if isinstance(text_inputs_forget[i], list) else " ")
+                    + text_inputs_forget[i]
+                    for i in range(len(text_inputs_forget))
+                ]
+                with torch.inference_mode():
+                    unconditioned_mel_spec_forget, _ = self.accelerator.unwrap_model(self.teacher).sample(
+                        cond=torch.zeros_like(mel_spec_forget),
+                        text=infer_texts_forget,
+                        duration=mel_spec_forget.size(1) * 2,
+                        max_duration=mel_spec_forget.size(1) * 2,
+                        no_ref_audio=True,
+                        steps=nfe_step,
+                        cfg_strength=cfg_strength,
+                        sway_sampling_coef=sway_sampling_coef,
+                    )
+                    unconditioned_mel_spec_forget = unconditioned_mel_spec_forget.to(torch.float32)
+                    unconditioned_mel_spec_forget = unconditioned_mel_spec_forget[:, mel_spec_forget.size(1) :].to(
+                        self.accelerator.device
+                    )
+
+                forget_loss, _, _ = self.model.forward_unlearn(
+                    mel_spec_forget,
+                    text=text_inputs_forget,
+                    lens=mel_lengths_forget,
+                    noise_scheduler=self.noise_scheduler,
+                    forget=True,
+                    flow_inp=unconditioned_mel_spec_forget,
+                )
+            else:
+                forget_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+        elif unlearn_method == "SGU":
+            if mel_spec_forget.numel() > 0:
+                mel_spec_concat = torch.cat([mel_spec_forget, mel_spec_retain], dim=1)
+                text_inputs_concat = [
+                    text_inputs_forget[i] + " " + text_inputs_retain[i] for i in range(len(text_inputs_retain))
+                ]
+                mel_lengths_concat = mel_lengths_forget + mel_lengths_retain
+
+                forget_loss, _, _ = self.model.forward_unlearn_SGU(
+                    mel_spec_concat,
+                    text=text_inputs_concat,
+                    lens=mel_lengths_concat,
+                    retain_lens=mel_lengths_retain,
+                    noise_scheduler=self.noise_scheduler,
+                )
+            else:
+                forget_loss = torch.tensor(0.0, device=self.accelerator.device)
+
+            retain_loss, _, _ = self.model.forward_unlearn(
+                mel_spec_retain,
+                text=text_inputs_retain,
+                lens=mel_lengths_retain,
+                noise_scheduler=self.noise_scheduler,
+                forget=False,
+            )
+
+        else:
+            raise ValueError(f"Unknown unlearning method for pre-grad losses: {unlearn_method}")
+
+        return retain_loss, forget_loss
+
     def train_TGU(self, train_dataset: Dataset, num_workers=16, resumable_with_seed: int = None):
         if self.log_samples:
             # vocoder = load_vocoder(
@@ -1093,40 +673,23 @@ class TrainerUnlearn:  # TODO add info logger
         start_update = self.load_checkpoint()
         global_update = start_update
 
-        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("use", False):
-            self.prepare_model_for_diffit()
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
-            self.prepare_model_for_dit_blocks_mlp()
-
-        self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
-        grad_means = self._run_svdiff_uv_pre_grad_logging(
-            train_dataset,
+        self.finetune_strategy.apply(self.accelerator.unwrap_model(self.model))
+        if self.finetune_strategy.requires_optimizer_reset:
+            self.reset_optimizer_and_scheduler_for_trainable_params(
+                warmup_updates, decay_updates, context=self.finetune_strategy.name
+            )
+        self.finetune_strategy.run_pre_training_hook(
+            self,
+            unlearn_method="TGU",
+            train_dataset=train_dataset,
             num_workers=num_workers,
             resumable_with_seed=resumable_with_seed,
-            unlearn_method="TGU",
         )
 
-        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
-        pre_grad_top_k = svdiff_uv_cfg.get("pre_grad_top_k", None)
-        if grad_means is not None and pre_grad_top_k is not None:
-            variant = self._get_svdiff_uv_type()
-            delta_param_name = self._svdiff_uv_delta_param_name(variant)
-            effective_delta_uv_elements = self._apply_svdiff_uv_top_k_column_mask(
-                grad_means, int(pre_grad_top_k), variant
-            )
-            # Compute effective trainable params: non-delta trainable + effective delta elements
-            non_delta_uv_trainable = sum(
-                p.numel()
-                for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
-                if p.requires_grad and delta_param_name not in n
-            )
-            effective_trainable = non_delta_uv_trainable + effective_delta_uv_elements
-            print(f"Effective trainable parameters (after top-k masking): {effective_trainable / 1e6:.3f}M")
-        else:
-            num_trainable_params = sum(
-                p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
-            )
-            print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
+        num_trainable_params = sum(
+            p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
+        )
+        print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()
@@ -1324,40 +887,23 @@ class TrainerUnlearn:  # TODO add info logger
         start_update = self.load_checkpoint()
         global_update = start_update
 
-        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("use", False):
-            self.prepare_model_for_diffit()
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("use", False):
-            self.prepare_model_for_dit_blocks_mlp()
-
-        self._prepare_model_for_svdiff_variant(warmup_updates, decay_updates)
-        grad_means = self._run_svdiff_uv_pre_grad_logging(
-            train_dataset,
+        self.finetune_strategy.apply(self.accelerator.unwrap_model(self.model))
+        if self.finetune_strategy.requires_optimizer_reset:
+            self.reset_optimizer_and_scheduler_for_trainable_params(
+                warmup_updates, decay_updates, context=self.finetune_strategy.name
+            )
+        self.finetune_strategy.run_pre_training_hook(
+            self,
+            unlearn_method="SGU",
+            train_dataset=train_dataset,
             num_workers=num_workers,
             resumable_with_seed=resumable_with_seed,
-            unlearn_method="SGU",
         )
 
-        svdiff_uv_cfg = self.model_cfg_dict.get("model", {}).get("finetune", {}).get("svdiff_uv", {})
-        pre_grad_top_k = svdiff_uv_cfg.get("pre_grad_top_k", None)
-        if grad_means is not None and pre_grad_top_k is not None:
-            variant = self._get_svdiff_uv_type()
-            delta_param_name = self._svdiff_uv_delta_param_name(variant)
-            effective_delta_uv_elements = self._apply_svdiff_uv_top_k_column_mask(
-                grad_means, int(pre_grad_top_k), variant
-            )
-            # Compute effective trainable params: non-delta trainable + effective delta elements
-            non_delta_uv_trainable = sum(
-                p.numel()
-                for n, p in self.accelerator.unwrap_model(self.model).named_parameters()
-                if p.requires_grad and delta_param_name not in n
-            )
-            effective_trainable = non_delta_uv_trainable + effective_delta_uv_elements
-            print(f"Effective trainable parameters (after top-k masking): {effective_trainable / 1e6:.3f}M")
-        else:
-            num_trainable_params = sum(
-                p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
-            )
-            print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
+        num_trainable_params = sum(
+            p.numel() for p in self.accelerator.unwrap_model(self.model).parameters() if p.requires_grad
+        )
+        print(f"Number of trainable parameters in student model: {num_trainable_params / 1e6:.3f}M")
 
         # set teacher to eval and no grad
         self.accelerator.unwrap_model(self.teacher).eval()
@@ -1553,258 +1099,3 @@ class TrainerUnlearn:  # TODO add info logger
         self.save_checkpoint(global_update, last=True)
 
         self.accelerator.end_training()
-
-    def prepare_model_for_diffit(self):
-        #### V1: norm.weight is trainable, norm.bias is trainable
-        if self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v1":
-            trainable_names = (
-                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if ".bias" in name
-                    and "input_embed" not in name
-                    and "time_embed" not in name
-                    and "text_embed" not in name
-                ]
-                + [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "norm" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "text_embed" in name
-                ]
-            )
-
-        #### V2: norm.weight is frozen, norm.bias is trainable
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v2":
-            trainable_names = (
-                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if ".bias" in name
-                    and "input_embed" not in name
-                    and "time_embed" not in name
-                    and "text_embed" not in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "norm" in name and ".bias" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "text_embed" in name
-                ]
-            )
-
-        ### V3: like V2 but only bias from text embed
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v3":
-            trainable_names = (
-                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if ".bias" in name
-                    and "input_embed" not in name
-                    and "time_embed" not in name
-                    and "text_embed" not in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "norm" in name and ".bias" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "text_embed" in name and ".bias" in name
-                ]
-            )
-
-        ### V4: like V1 but with input_embed also trainable
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v4":
-            trainable_names = (
-                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if ".bias" in name
-                    and "input_embed" not in name
-                    and "time_embed" not in name
-                    and "text_embed" not in name
-                ]
-                + [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "norm" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "text_embed" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "input_embed" in name
-                ]
-            )
-
-        ### V5: Like V2 but with input_embed also trainable
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v5":
-            trainable_names = (
-                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if ".bias" in name
-                    and "input_embed" not in name
-                    and "time_embed" not in name
-                    and "text_embed" not in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "norm" in name and ".bias" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "text_embed" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "input_embed" in name
-                ]
-            )
-
-        ### V6: like V3 but input_embed.bias also trainable
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("diffit", {}).get("version") == "v6":
-            trainable_names = (
-                [name for name, _ in self.accelerator.unwrap_model(self.model).named_parameters() if "gamma_" in name]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if ".bias" in name
-                    and "input_embed" not in name
-                    and "time_embed" not in name
-                    and "text_embed" not in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "norm" in name and ".bias" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "text_embed" in name and ".bias" in name
-                ]
-                + [
-                    name
-                    for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                    if "input_embed" in name and ".bias" in name
-                ]
-            )
-        else:
-            raise ValueError(f"Unknown DiffIT version: {self.model_cfg_dict['model']['finetune']['diffit']['version']}")
-
-        print("Trainable parameters for DiffIT:")
-        trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
-        for name in trainable_names:
-            print(f"  - {name}")
-
-        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
-            p.requires_grad = False
-
-        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
-            if n in trainable_names:
-                p.requires_grad = True
-
-    def prepare_model_for_dit_blocks_mlp(self):
-        #### V1: only FFN and attn out projection are trainable in the specified blocks
-        if self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("version") == "v1":
-            trainable_names = [
-                name
-                for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                for i in self.model_cfg_dict["model"]["finetune"]["dit_blocks_mlp"]["blocks"]
-                if f"transformer_blocks.{i}." in name
-            ]
-            trainable_names = [
-                name for name in trainable_names if any(keyword in name for keyword in ["ff", "attn.to_out"])
-            ]
-        #### V2: only FFN and all attn projections are trainable in the specified blocks
-        elif self.model_cfg_dict["model"].get("finetune", {}).get("dit_blocks_mlp", {}).get("version") == "v2":
-            trainable_names = [
-                name
-                for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-                for i in self.model_cfg_dict["model"]["finetune"]["dit_blocks_mlp"]["blocks"]
-                if f"transformer_blocks.{i}." in name
-            ]
-            trainable_names = [
-                name
-                for name in trainable_names
-                if any(keyword in name for keyword in ["ff", "attn.to_out", "attn.to_k", "attn.to_q", "attn.to_v"])
-            ]
-        else:
-            raise ValueError(
-                f"Unknown DIT blocks MLP version: {self.model_cfg_dict['model']['finetune']['dit_blocks_mlp']['version']}"
-            )
-
-        print("Trainable parameters for DIT blocks MLP:")
-        trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
-        for name in trainable_names:
-            print(f"  - {name}")
-
-        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
-            p.requires_grad = False
-
-        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
-            if n in trainable_names:
-                p.requires_grad = True
-
-    def _prepare_model_for_svdiff(self, parametrization_cls, trainable_param_name: str, label: str):
-        module_params_dict = {
-            module: list(module.named_parameters(recurse=False))
-            for name, module in self.accelerator.unwrap_model(self.model).named_modules()
-        }
-        for name, module in self.accelerator.unwrap_model(self.model).named_modules():
-            if module not in module_params_dict:
-                continue
-            for param_name, param in module_params_dict[module]:
-                if param.requires_grad:
-                    full_param_name = f"{name}.{param_name}" if name else param_name
-                    if "weight" in full_param_name:
-                        try:
-                            parametrize.register_parametrization(module, param_name, parametrization_cls(param))
-                        except (ValueError, RuntimeError):
-                            continue
-
-        trainable_names = [
-            name
-            for name, _ in self.accelerator.unwrap_model(self.model).named_parameters()
-            if trainable_param_name in name
-        ]
-
-        print(f"Trainable parameters for {label}:")
-        trainable_names = sorted(list(set(trainable_names)))  # remove duplicates
-        for name in trainable_names:
-            print(f"  - {name}")
-
-        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
-            p.requires_grad = False
-
-        for n, p in self.accelerator.unwrap_model(self.model).named_parameters():
-            if n in trainable_names:
-                p.requires_grad = True
-
-    def prepare_model_for_svdiff(self):
-        self._prepare_model_for_svdiff(SVDParametrization, "delta_S", "SVDiff")
-
-    def prepare_model_for_svdiff_uv(self):
-        variant = self._get_svdiff_uv_type()
-        if variant == "u":
-            self._prepare_model_for_svdiff(SVDParametrizationU, "delta_U", "SVDiff-U")
-        elif variant == "v":
-            self._prepare_model_for_svdiff(SVDParametrizationV, "delta_V", "SVDiff-V")
-        else:
-            raise ValueError(f"Invalid svdiff_uv variant: {variant!r} (expected 'u' or 'v').")

@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch.nn as nn
 
 from f5_tts.model.finetune_strategies.base import FineTuningStrategy
 
+if TYPE_CHECKING:
+    from f5_tts.model.trainer_unlearn import TrainerUnlearn
+
 
 class DitBlocksMlpStrategy(FineTuningStrategy):
+    """Restricts training to selected sub-modules inside a chosen subset of DiT transformer blocks.
+
+    Only parameters under `transformer_blocks.{i}.` for each `i` in `config["blocks"]` are considered;
+    everything else is frozen. Two variants further narrow the selection within those blocks:
+    - `v1`: FFN (`ff`) and attention output projection (`attn.to_out`).
+    - `v2`: FFN plus all attention projections (`attn.to_out`, `attn.to_k`, `attn.to_q`, `attn.to_v`).
+
+    Commonly composed with `SVDiff` / `SVDiff-UV`, in which case the SVD parametrization is only
+    registered on the tensors this strategy leaves trainable.
+    """
+
     name = "DitBlocksMlp"
 
     def __init__(self, config: dict):
@@ -16,7 +32,7 @@ class DitBlocksMlpStrategy(FineTuningStrategy):
         self.version = version
         self.blocks = config.get("blocks", [])
 
-    def apply(self, unwrapped_model: nn.Module) -> None:
+    def apply(self, unwrapped_model: nn.Module, trainer: "TrainerUnlearn | None" = None) -> None:
         blocks = self.blocks
         trainable_names = [
             name for name, _ in unwrapped_model.named_parameters() for i in blocks if f"transformer_blocks.{i}." in name

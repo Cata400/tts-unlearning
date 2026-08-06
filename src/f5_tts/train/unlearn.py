@@ -34,21 +34,28 @@ def main(model_cfg):
             break
 
     svdiff_methods = {"svdiff", "svdiff_uv"}
+    selector_methods = {"fim"}
     svdiff_methods_use = [params.use for method, params in model_cfg.model.finetune.items() if method in svdiff_methods]
     assert sum(svdiff_methods_use) <= 1, "Only one SVDiff variant can be used at the same time"
 
-    finetune_methods_use = [
-        params.use for method, params in model_cfg.model.finetune.items() if method not in svdiff_methods
-    ]  # allow SVDiff variants to be used with finetuning methods
-    assert sum(finetune_methods_use) <= 1, "Multiple finetune methods cannot be used at the same time"
+    selector_methods_use = [
+        params.use for method, params in model_cfg.model.finetune.items() if method in selector_methods
+    ]
+    assert sum(selector_methods_use) <= 1, "Only one selector fine-tune method (fim) can be used at the same time"
 
-    if sum(finetune_methods_use) == 0:
+    freezer_methods_use = [
+        params.use
+        for method, params in model_cfg.model.finetune.items()
+        if method not in svdiff_methods and method not in selector_methods
+    ]  # SVDiff variants and selector methods (FIM) can compose with a freezer
+    assert sum(freezer_methods_use) <= 1, "Multiple freezer fine-tune methods cannot be used at the same time"
+
+    active_methods = [method for method, params in model_cfg.model.finetune.items() if params.use]
+    if not active_methods:
         print("The entire model will be finetuned without any parameter freezing.")
     else:
-        for method, params in model_cfg.model.finetune.items():
-            if params.use:
-                print(f"Using finetune method {method} with params: {params}")
-                break
+        for method in active_methods:
+            print(f"Using finetune method {method} with params: {model_cfg.model.finetune[method]}")
 
     model_cls = hydra.utils.get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch

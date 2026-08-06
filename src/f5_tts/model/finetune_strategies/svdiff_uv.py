@@ -94,6 +94,22 @@ def _accumulate_delta_grads_from_loss(
 
 
 class SVDiffUVStrategy(FineTuningStrategy):
+    """Reparametrizes every currently-trainable `.weight` as an SVD with an additive delta on `U` or `Vh`.
+
+    `U`, `S`, `Vh` are computed once from the initial weight and frozen as buffers; only the
+    per-tensor delta is trained:
+    - `type="u"`: weight becomes `(U + delta_U) @ diag(S) @ Vh`.
+    - `type="v"`: weight becomes `U @ diag(S) @ (Vh + delta_V.T)`.
+
+    Requires an optimizer reset after `apply` because the trainable parameter set changes.
+    Composes with upstream freezers (e.g. `DitBlocksMlp`, `FIM` at `granularity="layer"`), which
+    determine which weight tensors the parametrization is registered on.
+
+    Optionally runs a pre-training gradient profiling pass over `delta_U` / `delta_V` to log
+    per-column mean |grad| and, when `pre_grad_top_k` is set, install a column-wise grad mask
+    that keeps only the top-k columns per delta trainable during the actual training run.
+    """
+
     name = "SVDiff-UV"
 
     def __init__(self, config: dict):
@@ -108,7 +124,7 @@ class SVDiffUVStrategy(FineTuningStrategy):
     def requires_optimizer_reset(self) -> bool:
         return True
 
-    def apply(self, unwrapped_model: nn.Module) -> None:
+    def apply(self, unwrapped_model: nn.Module, trainer: "TrainerUnlearn | None" = None) -> None:
         if self.variant == "u":
             register_svd_parametrization(unwrapped_model, SVDParametrizationU, "delta_U", "SVDiff-U")
         elif self.variant == "v":

@@ -29,9 +29,9 @@ class CompositeStrategy(FineTuningStrategy):
         for child in self.children:
             child.register_wandb_metrics(logger)
 
-    def apply(self, unwrapped_model: nn.Module) -> None:
+    def apply(self, unwrapped_model: nn.Module, trainer: "TrainerUnlearn | None" = None) -> None:
         for child in self.children:
-            child.apply(unwrapped_model)
+            child.apply(unwrapped_model, trainer=trainer)
 
     def run_pre_training_hook(
         self,

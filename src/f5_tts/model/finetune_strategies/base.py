@@ -22,7 +22,8 @@ class FineTuningStrategy:
     def register_wandb_metrics(self, logger: str | None) -> None:
         return
 
-    def apply(self, unwrapped_model: nn.Module) -> None:
+    def apply(self, unwrapped_model: nn.Module, trainer: "TrainerUnlearn | None" = None) -> None:
+        # `trainer` is only used by strategies that need dataloader access at apply time (e.g. FIM).
         return
 
     @property

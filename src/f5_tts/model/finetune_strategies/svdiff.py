@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch.nn as nn
 import torch.nn.utils.parametrize as parametrize
 
 from f5_tts.model.finetune_strategies.base import FineTuningStrategy
 from f5_tts.model.modules import SVDParametrization
+
+if TYPE_CHECKING:
+    from f5_tts.model.trainer_unlearn import TrainerUnlearn
 
 
 def register_svd_parametrization(
@@ -45,6 +50,16 @@ def register_svd_parametrization(
 
 
 class SVDiffStrategy(FineTuningStrategy):
+    """Reparametrizes every currently-trainable `.weight` as `U @ diag(S + delta_S) @ Vh` (SVDiff).
+
+    `U`, `S`, `Vh` are computed once from the initial weight and frozen as buffers; only the
+    per-tensor `delta_S` vectors are trained. All other parameters are frozen.
+
+    Requires an optimizer reset after `apply` because the trainable parameter set changes.
+    Composes with upstream freezers (e.g. `DitBlocksMlp`, `FIM` at `granularity="layer"`), which
+    determine which weight tensors the parametrization is registered on.
+    """
+
     name = "SVDiff"
 
     def __init__(self, config: dict):
@@ -54,5 +69,5 @@ class SVDiffStrategy(FineTuningStrategy):
     def requires_optimizer_reset(self) -> bool:
         return True
 
-    def apply(self, unwrapped_model: nn.Module) -> None:
+    def apply(self, unwrapped_model: nn.Module, trainer: "TrainerUnlearn | None" = None) -> None:
         register_svd_parametrization(unwrapped_model, SVDParametrization, "delta_S", "SVDiff")

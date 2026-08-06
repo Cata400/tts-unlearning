@@ -64,6 +64,17 @@ model:
       pre_grad_top_k: 32 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
       pre_grad_log_forget_retain_separately: False # additionally log mean |grad| streams for retain and forget losses separately (top-k still uses combined grads); ignored when use_torchjd is True
       use_torchjd: False # default False, whether to use torchjd for gradient computation
+    fim:
+      use: True
+      granularity: layer # layer | weight: select whole tensors, or per-element (mask via grad hook)
+      top_k: 5 # number of units (layer -> modules/tensors, weight -> elements) to keep
+      top_k_mode: per_tensor # per_tensor | global; only used when granularity=weight
+      layer_score: mean # mean | sum; only used when granularity=layer (aggregation of Fisher scores)
+      layer_unit: module # module | parameter; only used when granularity=layer. module: aggregate Fisher over an nn.Module's direct params (Linear.weight+bias treated as one "layer"); parameter: rank each parameter tensor independently
+      profile_steps: 1000 # number of batches for averaging squared gradients (diagonal empirical Fisher)
+      loss_source: combined # combined | retain | forget: which loss backward drives the Fisher estimate
+      param_filter: all # all | weights_only: restrict scored params to names containing "weight"
+      log_wandb: True
 
 ckpts:
   logger: wandb # wandb | tensorboard | null

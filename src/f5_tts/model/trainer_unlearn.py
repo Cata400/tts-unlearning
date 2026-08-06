@@ -673,7 +673,12 @@ class TrainerUnlearn:  # TODO add info logger
         start_update = self.load_checkpoint()
         global_update = start_update
 
-        self.finetune_strategy.apply(self.accelerator.unwrap_model(self.model))
+        # Stashed so strategies can build their own profiling dataloader from apply().
+        self._pretrain_dataset = train_dataset
+        self._pretrain_num_workers = num_workers
+        self._pretrain_resumable_with_seed = resumable_with_seed
+        self._pretrain_unlearn_method = "TGU"
+        self.finetune_strategy.apply(self.accelerator.unwrap_model(self.model), trainer=self)
         if self.finetune_strategy.requires_optimizer_reset:
             self.reset_optimizer_and_scheduler_for_trainable_params(
                 warmup_updates, decay_updates, context=self.finetune_strategy.name
@@ -887,7 +892,12 @@ class TrainerUnlearn:  # TODO add info logger
         start_update = self.load_checkpoint()
         global_update = start_update
 
-        self.finetune_strategy.apply(self.accelerator.unwrap_model(self.model))
+        # Stashed so strategies can build their own profiling dataloader from apply().
+        self._pretrain_dataset = train_dataset
+        self._pretrain_num_workers = num_workers
+        self._pretrain_resumable_with_seed = resumable_with_seed
+        self._pretrain_unlearn_method = "SGU"
+        self.finetune_strategy.apply(self.accelerator.unwrap_model(self.model), trainer=self)
         if self.finetune_strategy.requires_optimizer_reset:
             self.reset_optimizer_and_scheduler_for_trainable_params(
                 warmup_updates, decay_updates, context=self.finetune_strategy.name

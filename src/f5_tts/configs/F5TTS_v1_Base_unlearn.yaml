@@ -51,9 +51,18 @@ model:
       diffit_blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
       version: v6 # v1 | v2 | v3 | v4 | v5 | v6
     dit_blocks_mlp:
-      use: True
+      use: False
       blocks: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
       version: v1 # v1 | v2
+    fim_dit_blocks_mlp:
+      use: True
+      top_k: 11 # number of DiT blocks to keep (ranked by aggregated FIM)
+      version: v1 # v1 | v2: same keyword filter as dit_blocks_mlp within selected blocks
+      layer_score: sum # mean | sum: aggregation of per-parameter Fisher within a block (FIM_k)
+      profile_steps: 1000 # number of batches for averaging squared gradients (diagonal empirical Fisher)
+      loss_source: combined # combined | retain | forget: which loss backward drives the Fisher estimate
+      param_filter: all # all | weights_only: restrict scored params to names containing "weight"
+      log_wandb: True
     svdiff:
       use: False
     svdiff_uv:
@@ -61,11 +70,11 @@ model:
       type: u # u | v: which SVD factor to delta-fine-tune (U columns or V columns before the transpose)
       pre_grad_enabled: True # run pre-optimization gradient profiling before training
       pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta tensor
-      pre_grad_top_k: 32 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
+      pre_grad_top_k: 64 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
       pre_grad_log_forget_retain_separately: False # additionally log mean |grad| streams for retain and forget losses separately (top-k still uses combined grads); ignored when use_torchjd is True
       use_torchjd: False # default False, whether to use torchjd for gradient computation
     fim:
-      use: True
+      use: False
       granularity: layer # layer | weight: select whole tensors, or per-element (mask via grad hook)
       top_k: 5 # number of units (layer -> modules/tensors, weight -> elements) to keep
       top_k_mode: per_tensor # per_tensor | global; only used when granularity=weight

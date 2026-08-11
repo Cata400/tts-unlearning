@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 import torch.nn as nn
 
@@ -8,6 +8,35 @@ from f5_tts.model.finetune_strategies.base import FineTuningStrategy
 
 if TYPE_CHECKING:
     from f5_tts.model.trainer_unlearn import TrainerUnlearn
+
+
+VALID_DIT_BLOCKS_MLP_VERSIONS = ("v1", "v2")
+
+# v1 = FFN + attn output projection; v2 = FFN + all attn projections.
+_VERSION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "v1": ("ff", "attn.to_out"),
+    "v2": ("ff", "attn.to_out", "attn.to_k", "attn.to_q", "attn.to_v"),
+}
+
+
+def select_dit_block_mlp_param_names(
+    unwrapped_model: nn.Module,
+    blocks: Iterable[int],
+    version: str,
+    block_module_prefix: str = "transformer_blocks",
+) -> list[str]:
+    """Return the sorted list of parameter names inside `blocks` matching the v1/v2 keyword filter."""
+    if version not in _VERSION_KEYWORDS:
+        raise ValueError(f"Unknown DIT blocks MLP version: {version}")
+    keywords = _VERSION_KEYWORDS[version]
+    block_prefixes = tuple(f"{block_module_prefix}.{i}." for i in blocks)
+    trainable_names: set[str] = set()
+    for name, _ in unwrapped_model.named_parameters():
+        if not any(prefix in name for prefix in block_prefixes):
+            continue
+        if any(keyword in name for keyword in keywords):
+            trainable_names.add(name)
+    return sorted(trainable_names)
 
 
 class DitBlocksMlpStrategy(FineTuningStrategy):
@@ -27,40 +56,18 @@ class DitBlocksMlpStrategy(FineTuningStrategy):
     def __init__(self, config: dict):
         self.config = config
         version = config.get("version")
-        if version not in ("v1", "v2"):
+        if version not in VALID_DIT_BLOCKS_MLP_VERSIONS:
             raise ValueError(f"Unknown DIT blocks MLP version: {version}")
         self.version = version
         self.blocks = config.get("blocks", [])
 
     def apply(self, unwrapped_model: nn.Module, trainer: "TrainerUnlearn | None" = None) -> None:
-        blocks = self.blocks
-        trainable_names = [
-            name for name, _ in unwrapped_model.named_parameters() for i in blocks if f"transformer_blocks.{i}." in name
-        ]
-
-        #### V1: only FFN and attn out projection are trainable in the specified blocks
-        if self.version == "v1":
-            trainable_names = [
-                name for name in trainable_names if any(keyword in name for keyword in ["ff", "attn.to_out"])
-            ]
-        #### V2: only FFN and all attn projections are trainable in the specified blocks
-        elif self.version == "v2":
-            trainable_names = [
-                name
-                for name in trainable_names
-                if any(keyword in name for keyword in ["ff", "attn.to_out", "attn.to_k", "attn.to_q", "attn.to_v"])
-            ]
-        else:
-            raise ValueError(f"Unknown DIT blocks MLP version: {self.version}")
+        trainable_names = select_dit_block_mlp_param_names(unwrapped_model, self.blocks, self.version)
 
         print("Trainable parameters for DIT blocks MLP:")
-        trainable_names = sorted(list(set(trainable_names)))
         for name in trainable_names:
             print(f"  - {name}")
 
-        for _, p in unwrapped_model.named_parameters():
-            p.requires_grad = False
-
+        trainable_set = set(trainable_names)
         for n, p in unwrapped_model.named_parameters():
-            if n in trainable_names:
-                p.requires_grad = True
+            p.requires_grad = n in trainable_set

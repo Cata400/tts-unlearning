@@ -264,7 +264,7 @@ def main():
             unlearning_avg_results_sim_pretrained_gt_emb_avg
         )
 
-    result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF', 'diversity', 'delta_sim'] else ''}.json"
+    result_path = f"{gen_wav_dir}/_{eval_task}_results{'_' + sim_model_type if eval_task in ['sim', 'spk-ZRF', 'diversity', 'delta_sim', 'sim_gt_matching'] else ''}.json"
     with open(result_path, "w") as f:
         json.dump(all_results, f, indent=4)
 

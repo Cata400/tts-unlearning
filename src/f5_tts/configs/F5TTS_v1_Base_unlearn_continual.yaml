@@ -1,0 +1,135 @@
+datasets:
+  name: LibriTTS_100_train_intra_speaker_split_0.2  # dataset name
+  ## SGU
+  batch_size_per_gpu: 2 # 2048
+  batch_size_type: balanced_unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
+  ## TGU
+  # batch_size_per_gpu: 2048 # 4
+  # batch_size_type: frame # unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
+  max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
+  num_workers: 16
+
+optim:
+  epochs: 4
+  learning_rate: 1e-5
+  num_warmup_updates: 20000  # warmup updates
+  grad_accumulation_steps: 1  # note: updates = steps / grad_accumulation_steps
+  max_grad_norm: 1.0  # gradient clipping
+  bnb_optimizer: False  # use bnb 8bit AdamW optimizer or not
+
+model:
+  name: F5TTS_v1_Base  # model name
+  tokenizer: pinyin  # tokenizer type
+  tokenizer_path: null  # if 'custom' tokenizer, define the path want to use (should be vocab.txt)
+  backbone: DiT
+  arch:
+    dim: 1024
+    depth: 22
+    heads: 16
+    ff_mult: 2
+    text_dim: 512
+    text_mask_padding: True
+    qk_norm: null  # null | rms_norm
+    conv_layers: 4
+    pe_attn_head: null
+    attn_backend: torch  # torch | flash_attn
+    attn_mask_enabled: False
+    checkpoint_activations: False  # recompute activations and save memory for extra compute
+  mel_spec:
+    target_sample_rate: 24000
+    n_mel_channels: 100
+    hop_length: 256
+    win_length: 1024
+    n_fft: 1024
+    mel_spec_type: vocos  # vocos | bigvgan
+  vocoder:
+    is_local: False  # use local offline ckpt or not
+    local_path: null  # local vocoder path
+  finetune:
+    diffit:
+      use: False
+      diffit_blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      version: v6 # v1 | v2 | v3 | v4 | v5 | v6
+    dit_blocks_mlp:
+      use: False
+      blocks: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+      # blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+      version: v1 # v1 | v2
+    fim_dit_blocks_mlp:
+      use: True
+      top_k: 11 # number of DiT blocks to keep (ranked by aggregated FIM)
+      version: v1 # v1 | v2: same keyword filter as dit_blocks_mlp within selected blocks
+      layer_score: sum # mean | sum: aggregation of per-parameter Fisher within a block (FIM_k)
+      profile_steps: 1000 # number of batches for averaging squared gradients (diagonal empirical Fisher)
+      loss_source: combined # combined | retain | forget: which loss backward drives the Fisher estimate
+      param_filter: all # all | weights_only: restrict scored params to names containing "weight"
+      log_wandb: True
+    svdiff:
+      use: False
+    svdiff_uv:
+      use: True
+      type: u # u | v: which SVD factor to delta-fine-tune (U columns or V columns before the transpose)
+      pre_grad_enabled: True # run pre-optimization gradient profiling before training
+      pre_grad_steps: 1000 # number of batches for averaging per-column |grad| of each delta tensor
+      pre_grad_top_k: 64 # keep only top-k columns (by mean |grad|) trainable per delta tensor; null to keep all
+      pre_grad_log_forget_retain_separately: False # additionally log mean |grad| streams for retain and forget losses separately (top-k still uses combined grads); ignored when use_torchjd is True
+      use_torchjd: False # default False, whether to use torchjd for gradient computation
+    fim:
+      use: False
+      granularity: layer # layer | weight: select whole tensors, or per-element (mask via grad hook)
+      top_k: 5 # number of units (layer -> modules/tensors, weight -> elements) to keep
+      top_k_mode: per_tensor # per_tensor | global; only used when granularity=weight
+      layer_score: mean # mean | sum; only used when granularity=layer (aggregation of Fisher scores)
+      layer_unit: module # module | parameter; only used when granularity=layer. module: aggregate Fisher over an nn.Module's direct params (Linear.weight+bias treated as one "layer"); parameter: rank each parameter tensor independently
+      profile_steps: 1000 # number of batches for averaging squared gradients (diagonal empirical Fisher)
+      loss_source: combined # combined | retain | forget: which loss backward drives the Fisher estimate
+      param_filter: all # all | weights_only: restrict scored params to names containing "weight"
+      log_wandb: True
+
+ckpts:
+  logger: wandb # wandb | tensorboard | null
+  log_samples: True  # infer random sample per save checkpoint. wip, normal to fail with extra long samples
+  save_per_updates: 200000  # save intermediate checkpoint per updates (counted within the current step)
+  keep_last_n_checkpoints: -1  # -1 to keep all, 0 to not save intermediate, > 0 to keep last N checkpoints (per step)
+  last_per_updates: 5000  # save last checkpoint per updates (counted within the current step)
+  # save_dir: ckpts/${model.name}_${model.mel_spec.mel_spec_type}_${model.tokenizer}_${datasets.name}_continual_SGU_oversampling_svdiff_u_top64_plus_fim_dit_blocks_mlp_v1_top_11_blocks_ewc_0.1_fim_4_epochs
+  save_dir: ckpts/${model.name}_${model.mel_spec.mel_spec_type}_${model.tokenizer}_${datasets.name}_continual_SGU_oversampling_svdiff_u_top64_plus_fim_dit_blocks_mlp_v1_top_11_blocks_ewc_0.1_fim_future_forget_4_epochs
+  pretrained_path: /home/catalin.ciocirlan/phd/tts-unlearning/ckpts/pretrained/F5TTS_v1_Base/pretrained_model_1250000.safetensors
+
+unlearn:
+  random_seed: 42
+  # forget_speakers: [196]
+  forget_speakers: [196, 26, 40, 78, 87]
+  # forget_speakers: [196, 26, 40, 78, 87, 200, 250, 254, 374, 405]
+  unlearn_methods:
+    TGU:
+      use: False
+      lambda: 0.2 # retain weight, 1 - lambda is forget weight
+    SGU:
+      use: True
+      forget_ratio: 0.2 # probability of optimizing for forget
+      balanced_unlearn_sample_oversample_forget: True # whether to oversample forget samples for balanced_unlearn_sample batch type
+      retain_duration_budget_ratio: null # cap retain pool to ~forget pool total duration
+      retain_duration_budget_reset_per_epoch: False # whether to reset retain duration budget at the beginning of each epoch
+      forget_duration_budget_ratio: null # cap forget pool
+      always_retain_and_forget: False # default False, whether to have a combined loss instead of alternating between retain and forget optimization
+      use_torchjd: False # default False, whether to use torchjd for unlearning; if True forget_ratio is ignored
+
+continual:
+  lambda: 0.1 # float | null. When not null, adds an EWC-style anchor term to the training loss += lambda * 0.5 * sum_i F_i * (p_i - p*_i)^2
+               # over this step's TRAINABLE parameters (the SVD deltas under svdiff), anchored on their step-start values.
+  fisher: current_retain # none | current_retain. Fisher weighting of the anchor term; ignored when lambda is null.
+               #   'none'           -> identity weighting (plain L2 anchoring).
+               #   'current_retain' -> diagonal empirical Fisher over the trainable parameters, estimated at the
+               #                       step-start weights on THIS step's data. The previous step's data is gone by
+               #                       then, and it would also score the current forget speaker as retain material.
+  fisher_profile_steps: 1000 # number of batches used for the diagonal Fisher estimate; ignored when fisher is 'none'
+  fisher_loss_source: retain # combined | retain | forget; ignored when fisher is 'none'
+                             # only 'retain' keeps the current forget speaker out of the Fisher; the other two raise F
+                             # on the parameters the forget loss has to move, so the anchor fights the unlearning.
+  include_future_forget_speakers_in_retain: False # when False, speakers that will be unlearned at a LATER step are dropped from this step's data entirely.
+  resume: True # skip steps whose final checkpoint already exists and chain from it
+
+hydra:
+  run:
+    dir: ${ckpts.save_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -216,6 +216,11 @@ def main():
     forget_speakers = [int(speaker) for speaker in model_cfg.unlearn.forget_speakers]
     ckpt_dir_name = model_cfg.ckpts.save_dir.split("/")[-1]
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
+    if not os.path.isdir(args.processed_libritts_path):
+        raise ValueError(
+            f"--processed_libritts_path is not a directory: {args.processed_libritts_path}. Its basename names "
+            "the test set in every output path, so a wrong value silently points the eval at empty directories."
+        )
     testset = Path(args.processed_libritts_path).name
 
     steps = continual_steps(forget_speakers)
@@ -331,11 +336,11 @@ def main():
             )
             print(f"{eval_task.upper()} results saved to {result_path}")
 
-    summary_dir = f"{rel_path}/" + continual_summary_subdir(ckpt_dir_name, testset)
+    summary_dir = f"{rel_path}/" + continual_summary_subdir(ckpt_dir_name)
     os.makedirs(summary_dir, exist_ok=True)
     for eval_task in eval_tasks:
         suffix = f"_{args.sim_model_type}" if eval_task in SIM_MODEL_TASKS else ""
-        summary_path = f"{summary_dir}/_{eval_task}_results{suffix}_continual_summary.json"
+        summary_path = f"{summary_dir}/_{testset}_{eval_task}_results{suffix}_continual_summary.json"
         with open(summary_path, "w") as f:
             json.dump(summary[eval_task], f, indent=4)
         print(f"\n{eval_task.upper()} continual summary saved to {summary_path}")

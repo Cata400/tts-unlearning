@@ -23,16 +23,12 @@
 ###   --n_gpus N
 ###   --no_use_ema      generate from the online weights (the ones the chain is built from)
 ###   --skip_existing   skip a step whose output dir already holds a wav for every prompt
-### Positional args (backwards compatible with remote/script_inference.sh):
-###   $1: expname
-###   $2: processed_libritts_dataset_path
-###   $3: seed (default: 42)
-###   $4: n_gpus (default: 1)
+### Positional args are rejected: `$1` used to mean expname, so a mistyped config name silently
+### pointed the whole chain at the wrong checkpoints.
 #################################
 
 usage() {
     echo "Usage: $0 [--expname NAME] [--processed_libritts_dataset_path PATH] [--seed SEED] [--n_gpus N] [--no_use_ema] [--skip_existing]"
-    echo "       $0 EXP_NAME [PROCESSED_PATH] [SEED] [N_GPUS]"
 }
 
 EXPNAME=F5TTS_v1_Base_unlearn_continual
@@ -42,7 +38,6 @@ N_GPUS=1
 USE_EMA=1
 SKIP_EXISTING=0
 
-POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --expname|--config|--config_name)
@@ -87,24 +82,12 @@ while [ $# -gt 0 ]; do
             exit 1
             ;;
         *)
-            POSITIONAL+=("$1")
-            shift
+            echo "Positional arguments are not accepted: $1. Use the named flags, e.g. --expname."
+            usage
+            exit 1
             ;;
     esac
 done
-
-if [ "${#POSITIONAL[@]}" -ge 1 ]; then
-    EXPNAME="${POSITIONAL[0]}"
-fi
-if [ "${#POSITIONAL[@]}" -ge 2 ]; then
-    PROCESSED_LIBRITTS_DATASET_PATH="${POSITIONAL[1]}"
-fi
-if [ "${#POSITIONAL[@]}" -ge 3 ]; then
-    SEED="${POSITIONAL[2]}"
-fi
-if [ "${#POSITIONAL[@]}" -ge 4 ]; then
-    N_GPUS="${POSITIONAL[3]}"
-fi
 
 if [ -z "$EXPNAME" ]; then
     echo "Missing --expname (or positional EXP_NAME)."

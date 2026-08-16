@@ -15,7 +15,7 @@
 # remote/script_eval.sh). A step with no generated wavs yet is reported and skipped. On top of the
 # usual per-step results this writes a continual_avg_* block (current / past / future / cumulative
 # forget + retain) and a chain-level step x forget-speaker summary matrix under
-#   results/{ckpt_dir_name}_continual_summary/{testset}/
+#   results/{ckpt_dir_name}/_{testset}_{task}_results[_{sim_model}]_continual_summary.json
 
 ########### Arguments ###########
 ### Named args (preferred):
@@ -28,15 +28,12 @@
 ###   --gen_wav_dir_pretrained DIR                (delta_sim)
 ###   --embeddings_dir_gt DIR                     (delta_sim)
 ###   --embeddings_dir_pretrained DIR             (delta_sim)
-### Positional args (backwards compatible with remote/script_eval.sh, minus GEN_WAV_DIR):
-###   $1: processed_libritts_path
-###   $2: config_name
-###   $3: sim_model_type
+### Positional args are rejected: `$1` used to mean processed_libritts_path, so passing the config
+### name first silently renamed the test set in every output path.
 #################################
 
 usage() {
     echo "Usage: $0 [--config_name NAME] [--processed_libritts_path PATH] [--eval_tasks \"sim wer\"] [--sim_model_type TYPE] [...]"
-    echo "       $0 [PROCESSED_PATH] [CONFIG_NAME] [SIM_MODEL_TYPE]"
 }
 
 CONFIG_NAME=F5TTS_v1_Base_unlearn_continual
@@ -54,7 +51,6 @@ GEN_WAV_DIR_PRETRAINED=/home/catalin.ciocirlan/phd/tts-unlearning/results/pretra
 EMBEDDINGS_DIR_GT=/home/catalin.ciocirlan/phd/tts-unlearning/results/embeddings_speechbrain_ecapa_train-clean-100_val_intra_speaker_split_0.2_gt
 EMBEDDINGS_DIR_PRETRAINED=/home/catalin.ciocirlan/phd/tts-unlearning/results/embeddings_speechbrain_ecapa_train-clean-100_val_intra_speaker_split_0.2_pretrained
 
-POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --config_name|--config)
@@ -127,21 +123,12 @@ while [ $# -gt 0 ]; do
             exit 1
             ;;
         *)
-            POSITIONAL+=("$1")
-            shift
+            echo "Positional arguments are not accepted: $1. Use the named flags, e.g. --config_name."
+            usage
+            exit 1
             ;;
     esac
 done
-
-if [ "${#POSITIONAL[@]}" -ge 1 ]; then
-    PROCESSED_LIBRITTS_PATH="${POSITIONAL[0]}"
-fi
-if [ "${#POSITIONAL[@]}" -ge 2 ]; then
-    CONFIG_NAME="${POSITIONAL[1]}"
-fi
-if [ "${#POSITIONAL[@]}" -ge 3 ]; then
-    SIM_MODEL_TYPE="${POSITIONAL[2]}"
-fi
 
 echo "CONFIG_NAME: $CONFIG_NAME"
 echo "PROCESSED_LIBRITTS_PATH: $PROCESSED_LIBRITTS_PATH"

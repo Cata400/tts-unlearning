@@ -321,6 +321,8 @@ def continual_results_subdir(
     no_ref_audio: bool = False,
 ) -> str:
     """Path under `results/` for one step's generated wavs; mirrors `eval_libritts_infer_batch.py`."""
+    if float(sway_sampling_coef).is_integer():
+        sway_sampling_coef = int(sway_sampling_coef)
     return (
         f"results/{ckpt_dir_name}/{step_tag}_{testset}/"
         f"seed{seed}_{ode_method}_nfe{nfe_step}_{mel_spec_type}"
@@ -331,6 +333,6 @@ def continual_results_subdir(
     )
 
 
-def continual_summary_subdir(ckpt_dir_name: str, testset: str) -> str:
-    """Path under `results/` for the chain-level evaluation summary."""
-    return f"results/{ckpt_dir_name}_continual_summary/{testset}"
+def continual_summary_subdir(ckpt_dir_name: str) -> str:
+    """Directory for the chain-level summaries: the per-step wav dirs' parent, so one run is one tree."""
+    return f"results/{ckpt_dir_name}"

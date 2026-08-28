@@ -562,6 +562,32 @@ class TrainerUnlearn:  # TODO add info logger
 
         return train_dataloader
 
+    def release_dataloader(self, dataloader) -> None:
+        """Shut a prepared dataloader's persistent workers down and drop accelerate's reference to it.
+
+        `Accelerator.prepare` appends every dataloader to `accelerator._dataloaders` and never drops
+        it, so with `persistent_workers=True` each prepared loader keeps `num_workers` processes
+        alive until the process exits. Profiling hooks and continual steps prepare several loaders
+        per run, which is enough to OOM the host.
+        """
+        accelerator = self.accelerator
+        accelerator._dataloaders = [entry for entry in accelerator._dataloaders if entry is not dataloader]
+
+        iterator = getattr(dataloader, "_iterator", None)
+        if iterator is not None:
+            dataloader._iterator = None
+            # The caller may still hold the iterator, so `__del__` is not enough to stop the workers.
+            shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+            if shutdown_workers is not None:
+                shutdown_workers()
+
+    def release_stale_prepared_optimizers(self) -> None:
+        """Drop accelerate's references to optimizers/schedulers that are no longer the live ones."""
+        accelerator = self.accelerator
+        live_scheduler = getattr(self, "scheduler", None)
+        accelerator._optimizers = [entry for entry in accelerator._optimizers if entry is self.optimizer]
+        accelerator._schedulers = [entry for entry in accelerator._schedulers if entry is live_scheduler]
+
     def _compute_pre_grad_losses(self, batch, unlearn_method: str) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute (retain_loss, forget_loss) for one profiling batch (used by fine-tune pre-grad hooks)."""
         text_inputs_retain = batch["text_retain"]

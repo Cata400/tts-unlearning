@@ -128,6 +128,8 @@ def compute_fisher(
             trainer.model.train()
         else:
             trainer.model.eval()
+        pre_iter = None
+        trainer.release_dataloader(pre_dataloader)
 
     if effective_steps == 0 or not fisher_sums:
         return None

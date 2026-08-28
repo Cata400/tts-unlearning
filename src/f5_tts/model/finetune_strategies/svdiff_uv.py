@@ -293,6 +293,8 @@ class SVDiffUVStrategy(FineTuningStrategy):
                 trainer.model.train()
             else:
                 trainer.model.eval()
+            pre_iter = None
+            trainer.release_dataloader(pre_dataloader)
 
         if effective_steps == 0:
             print(f"{label} pre-grad logging skipped: no {delta_param_name} gradients were collected.")

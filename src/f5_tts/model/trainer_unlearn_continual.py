@@ -483,6 +483,11 @@ class TrainerUnlearnContinual(TrainerUnlearn):
         # 8. the artefact the next step (and inference/evaluation) starts from.
         self.save_checkpoint(local_update, final=True, step=step)
 
+        # 9. tear the step down: accelerate keeps every object it prepared, so without this each
+        #    step leaks its dataloaders' persistent workers and its optimizer state into the next.
+        self.release_dataloader(train_dataloader)
+        self.release_stale_prepared_optimizers()
+
         del anchor, train_dataloader
         gc.collect()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None

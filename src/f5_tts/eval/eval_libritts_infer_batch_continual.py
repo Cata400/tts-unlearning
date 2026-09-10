@@ -143,7 +143,7 @@ def main():
     print(f"Running inference for: {[step['tag'] for step in selected_steps]}")
 
     processed_libritts_test_path = args.processed_libritts_dataset_path
-    metainfo = get_processed_libritts_metainfo(processed_libritts_test_path)
+    metainfo = get_processed_libritts_metainfo(processed_libritts_test_path, seed=seed)
     testset = Path(processed_libritts_test_path).name
     print(
         f"Loaded {len(metainfo)} samples from {testset} for inference. Some samples may be further skipped due to length limits."

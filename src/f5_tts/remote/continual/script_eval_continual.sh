@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH -p supermicro
 
-# Submit from src/f5_tts:  sbatch remote/continual/script_eval_continual.sh --config_name F5TTS_v1_Base_unlearn_continual
+# Submit from src/f5_tts:  sbatch remote/continual/script_eval_continual.sh --expname F5TTS_v1_Base_unlearn_continual
 #
 # One python3 call evaluates every metric for ALL continual steps - the per-step generated-wav
 # directories are reconstructed from the config, so no --gen_wav_dir is needed (unlike
@@ -19,7 +19,7 @@
 
 ########### Arguments ###########
 ### Named args (preferred):
-###   --config_name NAME                          (default: F5TTS_v1_Base_unlearn_continual)
+###   --expname NAME                          (default: F5TTS_v1_Base_unlearn_continual)
 ###   --processed_libritts_path PATH
 ###   --eval_tasks "sim wer ..."                  (default: all of them)
 ###   --sim_model_type TYPE
@@ -33,10 +33,10 @@
 #################################
 
 usage() {
-    echo "Usage: $0 [--config_name NAME] [--processed_libritts_path PATH] [--eval_tasks \"sim wer\"] [--sim_model_type TYPE] [...]"
+    echo "Usage: $0 [--expname NAME] [--processed_libritts_path PATH] [--eval_tasks \"sim wer\"] [--sim_model_type TYPE] [...]"
 }
 
-CONFIG_NAME=F5TTS_v1_Base_unlearn_continual
+EXPNAME=F5TTS_v1_Base_unlearn_continual
 PROCESSED_LIBRITTS_PATH=/alpha/catalin.ciocirlan/Datasets/LibriTTS/train-clean-100_val_intra_speaker_split_0.2/
 EVAL_TASKS="sim sim_gt_matching delta_sim wer utmosv2"
 SIM_MODEL_TYPE=speechbrain_ecapa
@@ -53,8 +53,8 @@ EMBEDDINGS_DIR_PRETRAINED=/home/catalin.ciocirlan/phd/tts-unlearning/results/emb
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --config_name|--config)
-            CONFIG_NAME="$2"
+        --expname|--config_name|--config)
+            EXPNAME="$2"
             shift 2
             ;;
         --processed_libritts_path|--processed_libritts_dataset_path|--data_path)
@@ -130,7 +130,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-echo "CONFIG_NAME: $CONFIG_NAME"
+echo "EXPNAME: $EXPNAME"
 echo "PROCESSED_LIBRITTS_PATH: $PROCESSED_LIBRITTS_PATH"
 echo "EVAL_TASKS: $EVAL_TASKS"
 echo "SIM_MODEL_TYPE: $SIM_MODEL_TYPE"
@@ -148,7 +148,7 @@ module load anaconda/3
 conda activate f5-tts
 
 # arguments shared by every task: they select the config, the test set and the per-step wav dirs
-COMMON_ARGS=(--config_name "$CONFIG_NAME" --processed_libritts_path "$PROCESSED_LIBRITTS_PATH"
+COMMON_ARGS=(--config_name "$EXPNAME" --processed_libritts_path "$PROCESSED_LIBRITTS_PATH"
              --seed "$SEED" -nfe "$NFE_STEP" -o "$ODE_METHOD" -ss "$SWAY_SAMPLING"
              --cfg_strength "$CFG_STRENGTH" --speed "$SPEED" --gpu_nums "$GPU_NUMS")
 

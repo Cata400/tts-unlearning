@@ -170,7 +170,7 @@ def get_continual_group_results(speaker_avg_results, metric_key, step, forget_sp
 
 def run_eval_task(args, eval_task, gen_wav_dir, gpus, asr_ckpt_dir, wavlm_ckpt_dir):
     """Run one metric over one directory. Mirrors the task dispatch of `eval_libritts.main`."""
-    test_set = get_libritts_test(gen_wav_dir, gpus, args.processed_libritts_path)
+    test_set = get_libritts_test(gen_wav_dir, gpus, args.processed_libritts_path, seed=args.seed)
 
     if eval_task == "wer":
         full_results = run_asr_wer((test_set[0][0], args.lang, test_set[0][1], asr_ckpt_dir))
@@ -181,7 +181,9 @@ def run_eval_task(args, eval_task, gen_wav_dir, gpus, asr_ckpt_dir, wavlm_ckpt_d
     elif eval_task == "sim_gt_matching":
         full_results = run_sim_gt_matching(test_set[0][1], wavlm_ckpt_dir, args.sim_model_type)
     elif eval_task == "delta_sim":
-        pretrained_test_set = get_libritts_test(args.gen_wav_dir_pretrained, gpus, args.processed_libritts_path)
+        pretrained_test_set = get_libritts_test(
+            args.gen_wav_dir_pretrained, gpus, args.processed_libritts_path, seed=args.seed
+        )
         assert len(test_set) == len(
             pretrained_test_set
         ), "The number of samples in gen_wav_dir and gen_wav_dir_pretrained must be the same for delta_sim evaluation"

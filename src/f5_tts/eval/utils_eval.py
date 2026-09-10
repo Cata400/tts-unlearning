@@ -62,7 +62,16 @@ def get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path):
     return metainfo
 
 
-def get_processed_libritts_metainfo(processed_libritts_test_path, eval=False):
+def get_processed_libritts_metainfo(processed_libritts_test_path, eval=False, seed=None):
+    """Pair every speaker's utterances into (prompt, target) couples.
+
+    `seed` makes the pairing a pure function of that value. Leaving it None draws on the global
+    `random` state, which makes the result depend on how many times the caller has already used the
+    RNG - so a script that calls this once (inference) and a script that calls it in a loop
+    (continual evaluation) end up pairing the same utterance with different prompts, and the
+    similarity metrics then score generations against audio they were never cloned from.
+    """
+    rng = random.Random(seed) if seed is not None else random
     metainfo = []
     recordings = []
 
@@ -97,7 +106,7 @@ def get_processed_libritts_metainfo(processed_libritts_test_path, eval=False):
 
     # Create pairs of prompt and ground truth from different speakers
     for speaker_recordings in recordings:
-        random.shuffle(speaker_recordings)
+        rng.shuffle(speaker_recordings)
         for i in range(0, len(speaker_recordings) - 1, 2):
             ref_utt, ref_text, ref_wav = speaker_recordings[i]
             gen_utt, gen_text, gen_wav = speaker_recordings[i + 1]
@@ -428,8 +437,8 @@ def get_librispeech_test_copy(metalst, gen_wav_dir, gpus, librispeech_test_clean
     return test_set
 
 
-def get_libritts_test(gen_wav_dir, gpus, processed_libritts_path, eval_ground_truth=False):
-    lines = get_processed_libritts_metainfo(processed_libritts_path, eval=True)
+def get_libritts_test(gen_wav_dir, gpus, processed_libritts_path, eval_ground_truth=False, seed=None):
+    lines = get_processed_libritts_metainfo(processed_libritts_path, eval=True, seed=seed)
 
     test_set_ = []
     for line in tqdm(lines):

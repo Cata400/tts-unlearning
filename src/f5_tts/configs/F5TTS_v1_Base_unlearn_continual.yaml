@@ -120,15 +120,20 @@ continual:
                # over this step's TRAINABLE parameters (the SVD deltas under svdiff), anchored on their step-start values.
   fisher: current_retain # none | current_retain. Fisher weighting of the anchor term; ignored when lambda is null.
                #   'none'           -> identity weighting (plain L2 anchoring).
-               #   'current_retain' -> diagonal empirical Fisher over the trainable parameters, estimated at the
-               #                       step-start weights on THIS step's data. The previous step's data is gone by
-               #                       then, and it would also score the current forget speaker as retain material.
+               #   'current_retain' -> diagonal empirical Fisher over the trainable parameters, on THIS step's data.
+               #                       The previous step's data is gone by then, and it would also score the current
+               #                       forget speaker as retain material. It is evaluated at whatever weights
+               #                       'anchor' points at, so the Fisher and the anchor stay co-located.
   fisher_profile_steps: 1000 # number of batches used for the diagonal Fisher estimate; ignored when fisher is 'none'
   fisher_loss_source: retain # combined | retain | forget; ignored when fisher is 'none'
                              # only 'retain' keeps the current forget speaker out of the Fisher; the other two raise F
                              # on the parameters the forget loss has to move, so the anchor fights the unlearning.
+  fisher_normalize: none # none | mean | max
+  penalty_reduction: sum # sum | mean
+  anchor: step_start # step_start | pretrained
   include_future_forget_speakers_in_retain: False # when False, speakers that will be unlearned at a LATER step are dropped from this step's data entirely.
   resume: True # skip steps whose final checkpoint already exists and chain from it
+  init_from_ema: True # True | False. Which payload of the previous step's final checkpoint this step starts from:
 
 hydra:
   run:

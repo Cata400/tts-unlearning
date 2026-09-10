@@ -148,7 +148,7 @@ def main():
     gpus = parse_gpu_nums(args.gpu_nums)
     if eval_task in ["sim", "wer", "diversity", "utmosv2", "delta_sim", "sim_gt_matching"]:
         print("Loading test set...")
-        test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path)
+        test_set = get_libritts_test(gen_wav_dir, gpus, processed_libritts_path, seed=seed)
     if eval_task == "delta_sim":
         assert args.embeddings_dir_gt is not None, "embeddings_dir_gt is required for delta_sim evaluation"
         assert (
@@ -166,7 +166,7 @@ def main():
         ), "gen_wav_dir_pretrained is required if embeddings_dir_pretrained does not exist"
 
         print("Loading pretrained test set for delta sim evaluation...")
-        pretrained_test_set = get_libritts_test(args.gen_wav_dir_pretrained, gpus, processed_libritts_path)
+        pretrained_test_set = get_libritts_test(args.gen_wav_dir_pretrained, gpus, processed_libritts_path, seed=seed)
         assert len(test_set) == len(
             pretrained_test_set
         ), "The number of samples in gen_wav_dir and gen_wav_dir_pretrained must be the same for delta_sim evaluation"

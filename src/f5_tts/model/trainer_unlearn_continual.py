@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import gc
 import math
 import os
@@ -19,7 +20,10 @@ from f5_tts.infer.utils_infer import (
     sway_sampling_coef,
 )
 from f5_tts.model.continual_utils import (
+    VALID_ANCHOR_MODES,
     VALID_FISHER_MODES,
+    VALID_FISHER_NORMALIZATIONS,
+    VALID_PENALTY_REDUCTIONS,
     EWCAnchor,
     build_step_dataset,
     compute_trainable_fisher,
@@ -28,6 +32,7 @@ from f5_tts.model.continual_utils import (
     count_step_samples,
     materialized_ema_state_dict,
     materialized_state_dict,
+    parameters_at_pretrained_weights,
     strip_parametrizations,
 )
 from f5_tts.model.finetune_strategies import build_finetune_strategy
@@ -36,7 +41,8 @@ from f5_tts.model.utils import exists
 
 
 class TrainerUnlearnContinual(TrainerUnlearn):
-    """Sequential speaker unlearning: one forget speaker per step, chained through the online weights.
+    """Sequential speaker unlearning: one forget speaker per step, chained through the previous step's
+    online weights (or its EMA payload, with `continual.init_from_ema`).
 
     Each step re-runs the *whole* single-shot algorithm of `TrainerUnlearn` on a model initialised
     from the previous step's result, with one forget speaker and its own optimiser / EMA / LR
@@ -54,6 +60,16 @@ class TrainerUnlearnContinual(TrainerUnlearn):
     first continual step follows exactly the same code path as a single-speaker single-shot run.
     """
 
+    # Settings that change what a step optimises, so a resumed checkpoint must be checked against them.
+    TRACKED_CONTINUAL_SETTINGS = (
+        "ewc_lambda",
+        "fisher",
+        "fisher_normalize",
+        "anchor",
+        "penalty_reduction",
+        "init_from_ema",
+    )
+
     def __init__(self, *args, continual_params: dict | None = None, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -67,12 +83,31 @@ class TrainerUnlearnContinual(TrainerUnlearn):
         if self.fisher_mode not in VALID_FISHER_MODES:
             raise ValueError(f"continual.fisher must be one of {VALID_FISHER_MODES}, got {self.fisher_mode!r}")
 
+        self.fisher_normalize = str(continual_params.get("fisher_normalize", "none")).lower()
+        if self.fisher_normalize not in VALID_FISHER_NORMALIZATIONS:
+            raise ValueError(
+                f"continual.fisher_normalize must be one of {VALID_FISHER_NORMALIZATIONS}, "
+                f"got {self.fisher_normalize!r}"
+            )
+
+        self.ewc_anchor_mode = str(continual_params.get("anchor", "step_start")).lower()
+        if self.ewc_anchor_mode not in VALID_ANCHOR_MODES:
+            raise ValueError(f"continual.anchor must be one of {VALID_ANCHOR_MODES}, got {self.ewc_anchor_mode!r}")
+
+        self.ewc_penalty_reduction = str(continual_params.get("penalty_reduction", "sum")).lower()
+        if self.ewc_penalty_reduction not in VALID_PENALTY_REDUCTIONS:
+            raise ValueError(
+                f"continual.penalty_reduction must be one of {VALID_PENALTY_REDUCTIONS}, "
+                f"got {self.ewc_penalty_reduction!r}"
+            )
+
         self.fisher_profile_steps = int(continual_params.get("fisher_profile_steps", 200))
         self.fisher_loss_source = str(continual_params.get("fisher_loss_source", "retain"))
         self.include_future_forget_speakers_in_retain = bool(
             continual_params.get("include_future_forget_speakers_in_retain", False)
         )
         self.continual_resume = bool(continual_params.get("resume", True))
+        self.init_from_ema = bool(continual_params.get("init_from_ema", False))
 
         # Chain bookkeeping. `_global_update` is monotonic across the whole chain so the wandb x-axis
         # never goes backwards; per-step save cadence uses a step-local counter instead.
@@ -91,6 +126,7 @@ class TrainerUnlearnContinual(TrainerUnlearn):
         wandb.define_metric("task_loss", step_metric="train_step")
         wandb.define_metric("ewc_penalty", step_metric="train_step")
         wandb.define_metric("ewc_loss", step_metric="train_step")
+        wandb.define_metric("ewc_task_loss_ratio", step_metric="train_step")
         wandb.define_metric("continual/*", step_metric="train_step")
 
     def _log_scalars(self, values: dict):
@@ -122,9 +158,8 @@ class TrainerUnlearnContinual(TrainerUnlearn):
             "forget_speakers_done": list(step["past"]) + [step["speaker"]],
             "forget_speakers_pending": list(step["future"]),
             "forget_speakers_all": list(step["past"]) + [step["speaker"]] + list(step["future"]),
-            "ewc_lambda": self.ewc_lambda if self.ewc_lambda is not None else -1.0,
-            "fisher": self.fisher_mode,
             "materialized": 1,
+            **{key: self._continual_metadata_value(key) for key in self.TRACKED_CONTINUAL_SETTINGS},
         }
 
     def save_checkpoint(self, update, last=False, *, final=False, step=None):
@@ -198,6 +233,38 @@ class TrainerUnlearnContinual(TrainerUnlearn):
     def step_checkpoint_path(self, step_tag: str) -> str:
         return os.path.join(self.checkpoint_path, continual_checkpoint_name(step_tag))
 
+    def _warn_on_continual_metadata_mismatch(self, checkpoint_path: str, step_tag: str) -> None:
+        """Loudly flag a resumed step that was trained under different continual settings."""
+        if not self.is_main:
+            return
+        try:
+            stored = torch.load(checkpoint_path, weights_only=True, map_location="cpu").get("continual", {})
+        except Exception as error:  # a stale or truncated checkpoint must not abort the chain
+            print(f"F5-TTS WARNING: [{step_tag}] could not read continual metadata ({error}).")
+            return
+
+        current = self._continual_metadata_value
+        mismatched = [
+            f"{key}: checkpoint={stored.get(key)!r} vs config={current(key)!r}"
+            for key in self.TRACKED_CONTINUAL_SETTINGS
+            if key in stored and stored[key] != current(key)
+        ]
+        if mismatched:
+            print(
+                f"F5-TTS WARNING: [{step_tag}] reusing a checkpoint trained under different continual settings "
+                f"({'; '.join(mismatched)}). Delete it or set continual.resume=False to retrain this step."
+            )
+
+    def _continual_metadata_value(self, key: str):
+        return {
+            "ewc_lambda": self.ewc_lambda if self.ewc_lambda is not None else -1.0,
+            "fisher": self.fisher_mode,
+            "fisher_normalize": self.fisher_normalize,
+            "anchor": self.ewc_anchor_mode,
+            "penalty_reduction": self.ewc_penalty_reduction,
+            "init_from_ema": int(self.init_from_ema),
+        }[key]
+
     # ------------------------------------------------------------------ #
     # per-step setup
     # ------------------------------------------------------------------ #
@@ -248,8 +315,9 @@ class TrainerUnlearnContinual(TrainerUnlearn):
         """Load this step's starting weights.
 
         Step 1 goes through `load_pretrained_checkpoint` exactly like a single-shot run. Later steps
-        load the previous step's materialised checkpoint (online weights into the model, EMA payload
-        into the EMA, mirroring the side-effect of `load_pretrained_checkpoint`).
+        take the previous step's materialised checkpoint: its online weights, or its EMA payload when
+        `continual.init_from_ema` is set. The EMA module is restored from the checkpoint's EMA payload either way,
+        mirroring the side-effect of `load_pretrained_checkpoint`.
         """
         if not self._teacher_loaded:
             print("Load teacher")
@@ -261,9 +329,16 @@ class TrainerUnlearnContinual(TrainerUnlearn):
             self.load_pretrained_checkpoint(self.model)
             return
 
-        print(f"Step {step['index']}: initialising from {os.path.basename(previous_checkpoint_path)}")
-        model_state_dict, _ = self._read_plain_state_dicts(previous_checkpoint_path)
-        self.accelerator.unwrap_model(self.model).load_state_dict(model_state_dict, strict=True)
+        model_state_dict, ema_weights = self._read_plain_state_dicts(previous_checkpoint_path)
+        if self.init_from_ema and not ema_weights:
+            raise ValueError(
+                f"continual.init_from_ema=True but {previous_checkpoint_path} holds no ema_model_state_dict."
+            )
+        starting_weights = ema_weights if self.init_from_ema else model_state_dict
+        payload = "ema_model_state_dict" if self.init_from_ema else "model_state_dict"
+
+        print(f"Step {step['index']}: initialising from {os.path.basename(previous_checkpoint_path)} ({payload})")
+        self.accelerator.unwrap_model(self.model).load_state_dict(starting_weights, strict=True)
 
         if self.is_main:
             checkpoint = torch.load(previous_checkpoint_path, weights_only=True, map_location="cpu")
@@ -271,33 +346,54 @@ class TrainerUnlearnContinual(TrainerUnlearn):
                 self.ema_model.load_state_dict(checkpoint["ema_model_state_dict"])
             del checkpoint
 
-        del model_state_dict
+        del starting_weights, model_state_dict, ema_weights
         gc.collect()
 
     def _maybe_compute_fisher(self, step: dict) -> dict | None:
-        """Diagonal Fisher weighting the anchor, estimated at this step's starting weights.
+        """Diagonal Fisher weighting the anchor, estimated at whatever weights the anchor points at.
 
         Classic EWC scores the previous task, but the previous step's data is gone by now and it
         also holds the current forget speaker as retain material - which would raise `F` on exactly
         the parameters the forget loss must move. This step's own data with `fisher_loss_source:
         retain` is the accessible, conflict-free stand-in.
+
+        The evaluation *point* follows `continual.anchor`: `step_start` profiles where the model
+        already sits, `pretrained` profiles with the deltas moved onto the pretrained weights, so the
+        Fisher and the anchor stay co-located the way the EWC derivation assumes.
         """
         if self.ewc_lambda is None or self.fisher_mode == "none":
             return None
 
         print(
             f"[continual-EWC {step['tag']}] estimating the Fisher on this step's data "
-            f"(loss_source={self.fisher_loss_source})."
+            f"(loss_source={self.fisher_loss_source}, normalize={self.fisher_normalize}, "
+            f"at={self.ewc_anchor_mode} weights)."
         )
 
-        fisher = compute_trainable_fisher(
+        profile = functools.partial(
+            compute_trainable_fisher,
             self,
             profile_steps=self.fisher_profile_steps,
             loss_source=self.fisher_loss_source,
+            normalize=self.fisher_normalize,
             log_prefix=f"continual-EWC {step['tag']}",
         )
+
+        if self.ewc_anchor_mode == "pretrained":
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            with parameters_at_pretrained_weights(
+                unwrapped_model, self._pretrained_weights(), log_prefix=f"continual-EWC {step['tag']}"
+            ):
+                fisher = profile()
+        else:
+            fisher = profile()
+
         gc.collect()
         return fisher
+
+    def _pretrained_weights(self) -> dict:
+        """Pretrained weights for `continual.anchor: pretrained`, read off the never-trained teacher."""
+        return self.accelerator.unwrap_model(self.teacher).state_dict()
 
     # ------------------------------------------------------------------ #
     # driver
@@ -331,7 +427,8 @@ class TrainerUnlearnContinual(TrainerUnlearn):
         print(
             f"\n=== Continual unlearning: {len(steps)} steps, method={unlearn_method}, "
             f"ewc_lambda={self.ewc_lambda}, fisher={self.fisher_mode}, "
-            f"future_speakers_in_retain={self.include_future_forget_speakers_in_retain} ===\n"
+            f"future_speakers_in_retain={self.include_future_forget_speakers_in_retain}, "
+            f"init_from_ema={self.init_from_ema} ===\n"
         )
 
         previous_checkpoint_path = None
@@ -347,6 +444,7 @@ class TrainerUnlearnContinual(TrainerUnlearn):
 
             if self.continual_resume and os.path.exists(checkpoint_path):
                 print(f"[{step_tag}] final checkpoint already exists, skipping this step (continual.resume=True).")
+                self._warn_on_continual_metadata_mismatch(checkpoint_path, step_tag)
                 previous_checkpoint_path = checkpoint_path
                 continue
 
@@ -446,11 +544,18 @@ class TrainerUnlearnContinual(TrainerUnlearn):
         anchor = None
         if self.ewc_lambda is not None:
             fisher = self._maybe_compute_fisher(step)
-            anchor = EWCAnchor.build(unwrapped_model, fisher=fisher)
+            anchor = EWCAnchor.build(
+                unwrapped_model,
+                fisher=fisher,
+                anchor_mode=self.ewc_anchor_mode,
+                pretrained_weights=self._pretrained_weights() if self.ewc_anchor_mode == "pretrained" else None,
+                reduction=self.ewc_penalty_reduction,
+            )
             print(
                 f"[{step['tag']}] EWC anchor over {len(anchor)} tensors "
                 f"({anchor.num_elements / 1e6:.1f}M elements, lambda={self.ewc_lambda}, "
-                f"fisher_weighted={anchor.fisher_weighted})"
+                f"anchor={self.ewc_anchor_mode}, reduction={self.ewc_penalty_reduction}, "
+                f"fisher_weighted={anchor.fisher_weighted}, opening penalty={anchor.penalty().item():.6e})"
             )
             del fisher
             gc.collect()
@@ -502,6 +607,19 @@ class TrainerUnlearnContinual(TrainerUnlearn):
             return None, None
         penalty = anchor.penalty()
         return penalty, self.ewc_lambda * penalty
+
+    def _loss_scalars(self, loss, task_loss, ewc_penalty, ewc_term) -> dict:
+        """Per-update scalars; the ratio makes an inert or a dominating EWC term visible immediately."""
+        scalars = {
+            "loss": loss.item(),
+            "task_loss": task_loss.item(),
+            "lr": self.scheduler.get_last_lr()[0],
+        }
+        if ewc_term is not None:
+            scalars["ewc_penalty"] = ewc_penalty.item()
+            scalars["ewc_loss"] = ewc_term.item()
+            scalars["ewc_task_loss_ratio"] = scalars["ewc_loss"] / max(abs(scalars["task_loss"]), 1e-12)
+        return scalars
 
     def _train_step_TGU(self, train_dataloader, *, step, anchor, resumable_with_seed) -> int:
         """One continual step of TGU. Mirrors `TrainerUnlearn.train_TGU`'s epoch loop."""
@@ -620,15 +738,7 @@ class TrainerUnlearnContinual(TrainerUnlearn):
                     progress_bar.update(1)
                     progress_bar.set_postfix(update=str(local_update), loss=loss.item())
 
-                scalars = {
-                    "loss": loss.item(),
-                    "task_loss": task_loss.item(),
-                    "lr": self.scheduler.get_last_lr()[0],
-                }
-                if ewc_term is not None:
-                    scalars["ewc_penalty"] = ewc_penalty.item()
-                    scalars["ewc_loss"] = ewc_term.item()
-                self._log_scalars(scalars)
+                self._log_scalars(self._loss_scalars(loss, task_loss, ewc_penalty, ewc_term))
 
                 if local_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(local_update, last=True, step=step)
@@ -773,15 +883,7 @@ class TrainerUnlearnContinual(TrainerUnlearn):
                     progress_bar.update(1)
                     progress_bar.set_postfix(update=str(local_update), loss=loss.item())
 
-                scalars = {
-                    "loss": loss.item(),
-                    "task_loss": task_loss.item(),
-                    "lr": self.scheduler.get_last_lr()[0],
-                }
-                if ewc_term is not None:
-                    scalars["ewc_penalty"] = ewc_penalty.item()
-                    scalars["ewc_loss"] = ewc_term.item()
-                self._log_scalars(scalars)
+                self._log_scalars(self._loss_scalars(loss, task_loss, ewc_penalty, ewc_term))
 
                 if self.accelerator.is_local_main_process:
                     if self.accelerator.sync_gradients and (local_update % weight_stats_update_interval == 0 or i == 0):

@@ -10,6 +10,7 @@ import hydra
 from omegaconf import OmegaConf
 
 from f5_tts.model import CFM, TrainerUnlearn
+from f5_tts.model.augmentations import build_augmentation_pipeline
 from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer, seed_everything
 
@@ -128,12 +129,20 @@ def main(model_cfg):
         forget_speakers=model_cfg.unlearn.forget_speakers,
     )
 
+    augment_pipeline = build_augmentation_pipeline(
+        model_cfg.datasets.get("augment"),
+        model_cfg.model.mel_spec,
+    )
+    if augment_pipeline is not None:
+        print(augment_pipeline.describe())
+
     train_dataset = load_dataset(
         model_cfg.datasets.name,
         tokenizer,
         dataset_type="CustomUnlearningDataset",
         mel_spec_kwargs=model_cfg.model.mel_spec,
         forget_speakers=model_cfg.unlearn.forget_speakers,
+        augment_pipeline=augment_pipeline,
     )
 
     if unlearn_method == "TGU":

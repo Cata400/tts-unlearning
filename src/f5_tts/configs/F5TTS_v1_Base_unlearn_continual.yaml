@@ -8,6 +8,34 @@ datasets:
   # batch_size_type: frame # unlearn_sample  # frame | sample | unlearn_frame | unlearn_sample | balanced_unlearn_sample
   max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
   num_workers: 16
+  augment:
+    use: False
+    apply_to: forget  # forget | retain | both | batch
+    mel:
+      gain:
+        use: False
+        p: 0.0
+        gain_db: [-6.0, 6.0]
+      noise:
+        use: False
+        p: 0.0
+        snr_db: [10.0, 30.0]
+        colour: white  # white | pink | brown
+      reverb:
+        use: False
+        p: 0.0
+        rt60_s: [0.2, 0.8]
+        wet_level: [0.1, 0.5]
+    waveform:
+      rir:
+        use: False
+        p: 0.0
+        rt60_s: [0.15, 0.7]
+        room_dim_m: [[3.0, 3.0, 2.4], [10.0, 8.0, 4.0]]  # min / max corner of the sampled room size
+        max_order_cap: 12  # inverse_sabine returns very large ISM orders for long rt60
+        bank_size: 256  # impulse responses synthesised once in the parent process, then sampled from
+        bank_path: results/rir_banks/shoebox_24k.npz  # null to rebuild every run
+        bank_seed: 0
 
 optim:
   epochs: 4
@@ -98,9 +126,9 @@ ckpts:
 
 unlearn:
   random_seed: 42
-  # forget_speakers: [196]
   forget_speakers: [196, 26, 40, 78, 87]
-  # forget_speakers: [196, 26, 40, 78, 87, 200, 250, 254, 374, 405]
+  # forget_speakers: [196, 26, 87, 78, 40]
+  # forget_speakers: [40, 6209, 1088, 7447, 7505]
   unlearn_methods:
     TGU:
       use: False

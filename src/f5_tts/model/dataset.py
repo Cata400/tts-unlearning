@@ -11,6 +11,8 @@ from torch import nn
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 
+from f5_tts.model.augmentations import AugmentationPipeline
+from f5_tts.model.augmentations.batch import BatchAugmentor
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import default
 
@@ -177,6 +179,7 @@ class CustomUnlearningDataset(Dataset):
         mel_spec_type="vocos",
         preprocessed_mel=False,
         mel_spec_module: nn.Module | None = None,
+        augment_pipeline: AugmentationPipeline | None = None,
     ):
         self.data = custom_dataset
         self.durations = durations
@@ -187,6 +190,7 @@ class CustomUnlearningDataset(Dataset):
         self.win_length = win_length
         self.mel_spec_type = mel_spec_type
         self.preprocessed_mel = preprocessed_mel
+        self.augment_pipeline = augment_pipeline
 
         print(f"Speakers to forget: {self.forget_speakers}")
 
@@ -230,6 +234,8 @@ class CustomUnlearningDataset(Dataset):
 
             index = (index + 1) % len(self.data)
 
+        unlearn_label = -1 if speaker_id in self.forget_speakers else 1
+
         if self.preprocessed_mel:
             mel_spec = torch.tensor(row["mel_spec"])
         else:
@@ -244,14 +250,20 @@ class CustomUnlearningDataset(Dataset):
                 resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
                 audio = resampler(audio)
 
+            if self.augment_pipeline is not None:
+                audio = self.augment_pipeline.apply_waveform(audio, unlearn_label)
+
             # to mel spectrogram
             mel_spec = self.mel_spectrogram(audio)
             mel_spec = mel_spec.squeeze(0)  # '1 d t -> d t'
 
+        if self.augment_pipeline is not None:
+            mel_spec = self.augment_pipeline.apply_mel(mel_spec, unlearn_label)
+
         return {
             "mel_spec": mel_spec,
             "text": text,
-            "unlearn_label": -1 if speaker_id in self.forget_speakers else 1,
+            "unlearn_label": unlearn_label,
         }
 
 
@@ -706,6 +718,7 @@ def load_dataset(
     mel_spec_module: nn.Module | None = None,
     mel_spec_kwargs: dict = dict(),
     forget_speakers: List[int] | None = None,
+    augment_pipeline: AugmentationPipeline | None = None,
 ) -> CustomDataset | HFDataset:
     """
     dataset_type    - "CustomDataset" if you want to use tokenizer name and default data path to load for train_dataset
@@ -713,6 +726,12 @@ def load_dataset(
     """
 
     print("Loading dataset ...")
+
+    if augment_pipeline is not None and audio_type == "mel" and augment_pipeline.waveform_augs:
+        raise ValueError(
+            "Waveform augmentations need raw audio, but audio_type='mel' loads precomputed spectrograms. "
+            "Disable datasets.augment.waveform or load with audio_type='raw'."
+        )
 
     if dataset_type == "CustomDataset" or dataset_type == "CustomUnlearningDataset":
         rel_data_path = str(files("f5_tts").joinpath(f"../../data/{dataset_name}_{tokenizer}"))
@@ -744,6 +763,7 @@ def load_dataset(
                 durations=durations,
                 preprocessed_mel=preprocessed_mel,
                 mel_spec_module=mel_spec_module,
+                augment_pipeline=augment_pipeline,
                 **mel_spec_kwargs,
             )
 
@@ -800,7 +820,7 @@ def collate_fn(batch):
     )
 
 
-def collate_fn_unlearning(batch):
+def collate_fn_unlearning(batch, batch_augmentor: BatchAugmentor | None = None):
     mel_specs_retain = [item["mel_spec"].squeeze(0) for item in batch if item["unlearn_label"] == 1]
     mel_lengths_retain = torch.LongTensor([spec.shape[-1] for spec in mel_specs_retain])
     max_mel_length_retain = mel_lengths_retain.amax() if mel_lengths_retain.numel() > 0 else 0
@@ -836,6 +856,11 @@ def collate_fn_unlearning(batch):
     text_lengths_forget = torch.LongTensor([len(item) for item in text_forget])
 
     unlearn_labels = torch.LongTensor([item["unlearn_label"] for item in batch])
+
+    if batch_augmentor is not None:
+        mel_specs_retain, mel_specs_forget = batch_augmentor(
+            mel_specs_retain, mel_lengths_retain, mel_specs_forget, mel_lengths_forget
+        )
 
     return dict(
         mel_retain=mel_specs_retain,

@@ -198,7 +198,7 @@ class SVDiffUVStrategy(FineTuningStrategy):
             log_separately = False
 
         pre_dataloader = trainer.create_dataloader(
-            train_dataset, num_workers=num_workers, resumable_with_seed=resumable_with_seed
+            train_dataset, num_workers=num_workers, resumable_with_seed=resumable_with_seed, augment=False
         )
         pre_dataloader = trainer.accelerator.prepare(pre_dataloader)
 

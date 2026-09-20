@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import gc
 import math
 import os
@@ -28,6 +29,7 @@ from f5_tts.infer.utils_infer import (
     sway_sampling_coef,
 )
 from f5_tts.model import CFM
+from f5_tts.model.augmentations import dataset_without_augmentation
 from f5_tts.model.dataset import (
     BalancedUnlearningSampleBatchSampler,
     DynamicBatchSampler,
@@ -433,7 +435,22 @@ class TrainerUnlearn:  # TODO add info logger
         gc.collect()
         return update
 
-    def create_dataloader(self, train_dataset, num_workers=16, resumable_with_seed: int = None):
+    def create_dataloader(self, train_dataset, num_workers=16, resumable_with_seed: int = None, augment: bool = True):
+        """A dataloader over `train_dataset`. Pass `augment=False` for profiling passes that must see clean data."""
+        if not augment:
+            clean_dataset = dataset_without_augmentation(train_dataset)
+            if clean_dataset is not train_dataset:
+                print("[augment] disabled for this dataloader (profiling pass)")
+            train_dataset = clean_dataset
+
+        pipeline = getattr(train_dataset, "augment_pipeline", None)
+        batch_augmentor = pipeline.batch_augmentor() if pipeline is not None else None
+        collate_fn = (
+            collate_fn_unlearning
+            if batch_augmentor is None
+            else functools.partial(collate_fn_unlearning, batch_augmentor=batch_augmentor)
+        )
+
         if exists(resumable_with_seed):
             generator = torch.Generator()
             generator.manual_seed(resumable_with_seed)
@@ -454,7 +471,7 @@ class TrainerUnlearn:  # TODO add info logger
         if self.batch_size_type == "sample":
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn_unlearning,
+                collate_fn=collate_fn,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
@@ -483,7 +500,7 @@ class TrainerUnlearn:  # TODO add info logger
             )
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn_unlearning,
+                collate_fn=collate_fn,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
@@ -506,7 +523,7 @@ class TrainerUnlearn:  # TODO add info logger
             )
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn_unlearning,
+                collate_fn=collate_fn,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
@@ -525,7 +542,7 @@ class TrainerUnlearn:  # TODO add info logger
             )
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn_unlearning,
+                collate_fn=collate_fn,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
@@ -545,7 +562,7 @@ class TrainerUnlearn:  # TODO add info logger
             )
             train_dataloader = DataLoader(
                 train_dataset,
-                collate_fn=collate_fn_unlearning,
+                collate_fn=collate_fn,
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,

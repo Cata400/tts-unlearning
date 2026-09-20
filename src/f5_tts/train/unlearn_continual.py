@@ -10,6 +10,7 @@ import hydra
 from omegaconf import OmegaConf
 
 from f5_tts.model import CFM, TrainerUnlearnContinual
+from f5_tts.model.augmentations import build_augmentation_pipeline
 from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer, seed_everything
 
@@ -140,6 +141,13 @@ def main(model_cfg):
         continual_params=continual_params,
     )
 
+    augment_pipeline = build_augmentation_pipeline(
+        model_cfg.datasets.get("augment"),
+        model_cfg.model.mel_spec,
+    )
+    if augment_pipeline is not None:
+        print(augment_pipeline.describe())
+
     # Loaded once for the whole chain; each step derives a filtered view of this dataset.
     train_dataset = load_dataset(
         model_cfg.datasets.name,
@@ -147,6 +155,7 @@ def main(model_cfg):
         dataset_type="CustomUnlearningDataset",
         mel_spec_kwargs=model_cfg.model.mel_spec,
         forget_speakers=forget_speakers,
+        augment_pipeline=augment_pipeline,
     )
 
     trainer.train_continual(

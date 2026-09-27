@@ -1,9 +1,8 @@
 """Build the GitHub Pages audio demo page for the continual speaker-unlearning run.
 
 For each showcased speaker it picks `N_PER_SPEAKER` utterances that exist in all three
-sources (ground truth, pretrained generations, unlearned generations), transcodes them to
-MP3 under `docs/assets/audio/`, and writes `docs/index.md` with one comparison table per
-speaker.
+sources (ground truth, pretrained generations, unlearned generations), copies them to
+`docs/assets/audio/`, and writes `docs/index.md` with one comparison table per speaker.
 
 The unlearned column always comes from the *final* continual step, so the forgotten
 speakers are shown after the whole 5-speaker sequence has been unlearned.
@@ -16,7 +15,6 @@ from __future__ import annotations
 import html
 import json
 import shutil
-import subprocess
 import wave
 from pathlib import Path
 
@@ -50,14 +48,7 @@ MIN_DURATION = 4.0
 MAX_DURATION = 12.0
 FALLBACK_MAX_DURATION = 15.0
 
-MP3_ARGS = ["-ac", "1", "-ar", "24000", "-b:a", "96k"]
-
 SOURCES = ("gt", "pretrained", "unlearned")
-
-
-def check_ffmpeg() -> None:
-    if shutil.which("ffmpeg") is None:
-        raise SystemExit("ffmpeg not found on PATH. Install it first, e.g. `sudo apt install ffmpeg`.")
 
 
 def load_metainfo(run_dir: Path) -> dict[str, str]:
@@ -129,18 +120,15 @@ def select_utterances(speaker: int, common_ids: set[str]) -> list[str]:
     return chosen[:N_PER_SPEAKER]
 
 
-def transcode(src: Path, dest: Path) -> None:
+def copy_audio(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and dest.stat().st_mtime >= src.stat().st_mtime:
         return
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), *MP3_ARGS, str(dest)],
-        check=True,
-    )
+    shutil.copy2(src, dest)
 
 
 def export_audio(utterance_id: str, speaker: int) -> dict[str, str]:
-    """Transcode the three variants of one utterance; return source -> page-relative path."""
+    """Copy the three variants of one utterance; return source -> page-relative path."""
     sources = {
         "gt": gt_path(utterance_id),
         "pretrained": PRETRAINED_DIR / f"{utterance_id}.wav",
@@ -148,8 +136,8 @@ def export_audio(utterance_id: str, speaker: int) -> dict[str, str]:
     }
     relative: dict[str, str] = {}
     for name, src in sources.items():
-        rel = f"assets/audio/{speaker}/{utterance_id}__{name}.mp3"
-        transcode(src, DOCS_DIR / rel)
+        rel = f"assets/audio/{speaker}/{utterance_id}__{name}.wav"
+        copy_audio(src, DOCS_DIR / rel)
         relative[name] = rel
     return relative
 
@@ -267,7 +255,6 @@ def build_page(
 
 
 def main() -> None:
-    check_ffmpeg()
     for path in (GT_ROOT, PRETRAINED_DIR, UNLEARNED_DIR):
         if not path.is_dir():
             raise SystemExit(f"Missing required directory: {path}")

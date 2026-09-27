@@ -52,13 +52,16 @@ SOURCES = ("gt", "pretrained", "unlearned")
 
 
 def load_metainfo(run_dir: Path) -> dict[str, str]:
-    """Map utterance id -> the text that was synthesised, from a run's metainfo.txt."""
+    """Map utterance id -> the text that was synthesised, from a run's metainfo.txt.
+
+    Columns are: utt_id, prompt_text, prompt_wav, generated_text, ground_truth_wav.
+    """
     texts: dict[str, str] = {}
     with (run_dir / "metainfo.txt").open(encoding="utf-8") as handle:
         for line in handle:
             fields = line.rstrip("\n").split("\t")
-            if len(fields) >= 2:
-                texts[fields[0]] = fields[1].strip()
+            if len(fields) >= 4:
+                texts[fields[0]] = fields[3].strip()
     return texts
 
 
@@ -216,9 +219,10 @@ def build_page(
         "title: TTS Unlearning",
         "---",
         "",
-        "# Continual Speaker Unlearning for Zero-Shot TTS",
+        "# Continual Speaker Unlearning for Zero-Shot TTS (Work in Progress)",
         "",
-        "Samples from an F5-TTS v1 Base model finetuned on LibriTTS `train-clean-100`, then put through "
+        # Kept but commented out until the run and the file naming are final.
+        "<!-- Samples from an F5-TTS v1 Base model finetuned on LibriTTS `train-clean-100`, then put through "
         "**five sequential unlearning steps** that remove one speaker each, in the order "
         f"{order}. Every clip below is generated with the *final* model, after all five speakers have "
         "been unlearned.",
@@ -232,7 +236,10 @@ def build_page(
         "",
         summary_line(UNLEARNED_DIR),
         "",
-        "*This page is for research demonstration purposes only.*",
+        "*This page is for research demonstration purposes only.* -->",
+        "",
+        "Work in Progress. Audio file names probably won't remain there. Also the unlearned samples may "
+        "probably change.",
         "",
         "## Forgotten speakers",
         "",

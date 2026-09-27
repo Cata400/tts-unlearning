@@ -3,9 +3,9 @@ layout: default
 title: TTS Unlearning
 ---
 
-# Continual Speaker Unlearning for Zero-Shot TTS
+# Continual Speaker Unlearning for Zero-Shot TTS (Work in Progress)
 
-Samples from an F5-TTS v1 Base model finetuned on LibriTTS `train-clean-100`, then put through **five sequential unlearning steps** that remove one speaker each, in the order 196 → 26 → 40 → 78 → 87. Every clip below is generated with the *final* model, after all five speakers have been unlearned.
+<!-- Samples from an F5-TTS v1 Base model finetuned on LibriTTS `train-clean-100`, then put through **five sequential unlearning steps** that remove one speaker each, in the order 196 → 26 → 40 → 78 → 87. Every clip below is generated with the *final* model, after all five speakers have been unlearned.
 
 All samples use the same zero-shot setup: seed 42, Euler solver, NFE 32, CFG 2.0, sway sampling −1, speed 1.0, Vocos vocoder. The reference prompt is always another utterance from the same speaker, so a successful unlearn means the model can no longer copy the prompt's voice.
 
@@ -13,7 +13,9 @@ All samples use the same zero-shot setup: seed 42, Euler solver, NFE 32, CFG 2.0
 
 After all five unlearning steps, speaker similarity on the forgotten speakers drops to **0.186** while the retained speakers stay at **0.699**. Intelligibility and naturalness are preserved: WER **4.1%** and UTMOSv2 **3.43** on retained speakers.
 
-*This page is for research demonstration purposes only.*
+*This page is for research demonstration purposes only.* -->
+
+Work in Progress. Audio file names probably won't remain there. Also the unlearned samples may probably change.
 
 ## Forgotten speakers
 
